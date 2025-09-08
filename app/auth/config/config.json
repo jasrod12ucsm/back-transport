@@ -1,0 +1,15 @@
+{
+  "SECRET": "JTc/gVktujUvvo/mPPoYgZ/CVb2pss8bACuXdHkxFRg=",
+  "AUTH_PORT": 3001,
+  "AUTH_IP": "0.0.0.0",
+  "ALLOWED_ORIGIN": "*",
+  "SMTP_EMAIL": "jasonrch2011@gmail.com",
+  "SMTP_PASSWORD": "mpzeggjmqxmofawm",
+  "SMTP_SERVER": "smtp.gmail.com",
+  "SUR_USERNAME": "root",
+  "SUR_PASSWORD": "123546",
+  "PUBLIC_SUR_USERNAME": "root",
+  "EXP_MINUTES_SURREAL": 60,
+  "PUBLIC_SUR_PASSWORD": "123546",
+  "SURREAL_URL":"ws://127.0.0.1:8000"
+}

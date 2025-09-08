@@ -1,0 +1,32 @@
+
+syntax = "proto3";
+
+package geocache;
+
+
+
+service GetDevicesPolygonService{
+  rpc GetDevicesPolygon(GetDevicesPolygonRequest) returns (GetDevicesPolygonResponse);
+}
+
+
+message GetDevicesPolygonRequest {
+  double latitude_1 = 1;
+  double longitude_1 = 2;
+  double latitude_2 = 3;
+  double longitude_2 = 4;
+  double latitude_3 = 5;
+  double longitude_3 = 6;
+  double latitude_4 = 7;
+  double longitude_4 = 8;
+}
+
+message GetDevicesPolygonResponse {
+  repeated IdAndLocation device_ids = 1;
+}
+
+message IdAndLocation {
+  string id = 1;
+  double latitude = 2;
+  double longitude = 3;
+}

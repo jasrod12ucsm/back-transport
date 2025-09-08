@@ -1,0 +1,18 @@
+[workspace]
+members = [
+    "app/auth",
+    "app/app_config",
+    "app/authorization",
+    "app/api",
+    "common",
+]
+
+resolver = "3"
+
+[profile.release]
+# ⚡ Mejor rendimiento en producción
+opt-level = "z"         # Optimizaciones para tamaño (ó "3" para máximo rendimiento)
+lto = true              # Link Time Optimization (reduce binario, mejora CPU)
+codegen-units = 1       # Más lento de compilar pero mejor rendimiento final
+panic = "abort"         # Evita generar código de unwind para panics
+strip = true            # Remueve símbolos de depuración
