@@ -23,7 +23,6 @@ use ac_struct_back::{
 use common::public::functions::auth_surreal::SurrealManager;
 use config::env_config::EnvConfig;
 use deadpool::{Runtime, managed::Pool};
-use modules::template_type::presentation::template_type_scope::template_type_scope;
 use ntex::{
     time::Seconds,
     web::{self, HttpRequest, middleware::Logger, scope},
@@ -129,24 +128,21 @@ async fn main() -> std::io::Result<()> {
                     .allowed_methods(vec!["GET", "POST", "PUT", "DELETE", "PATCH"])
                     .finish(),
             )
-            .service(scope("/template_type").configure(template_type_scope))
             .service(
-                scope("/template")
-                    .configure(modules::template::presentation::template_scope::template_scope),
-            ).service(scope("/product_subscription").configure(modules::subscription_product::presentation::subscription_product_scope::subscription_product))
-            .service(scope("/country").configure(modules::country::presentation::country_scope::country_scope))
+                scope("/proyect")
+                    .configure(modules::proyect::presentation::proyect_scope::proyect_scope),
+            )
             .service(
-                scope("/timezone")
-                    .configure(modules::timezone::presentation::timezone_scope::timezone_scope),
-                )
+                scope("/app_charge").configure(
+                    modules::app_charge::presentation::app_charge_scope::app_charge_scope,
+                ),
+            )
     })
     .backlog(2048)
-    .client_timeout(Seconds::new(10))
-    .disconnect_timeout(Seconds(4))
+    .client_timeout(Seconds::new(10000))
+    .disconnect_timeout(Seconds(10000))
     .enable_affinity()
-    .headers_read_rate(Seconds(2), Seconds(10), 100)
-    .keep_alive(3)
-    .payload_read_rate(Seconds(1), Seconds(10), 1024)
+    .keep_alive(1000)
     .workers(num_cpus::get())
     .bind((CONFIG.AUTH_IP.clone(), CONFIG.AUTH_PORT))?
     .run()
