@@ -30,6 +30,8 @@ use ntex::{
 pub mod config;
 pub mod modules;
 pub mod utils;
+#[macro_use]
+extern crate lazy_static;
 
 use ntex_cors::Cors;
 use once_cell::sync::Lazy;

@@ -1,4 +1,4 @@
-use std::borrow::Cow;
+use std::{borrow::Cow, cell::RefCell, collections::HashMap, sync::RwLock};
 
 use ac_struct_back::{
     import::macro_import::TableName,
@@ -9,6 +9,8 @@ use ac_struct_back::{
     utils::domain::query::{GraphBuilder, OneOrMany, Query, execute_select_query},
 };
 use common::utils::ntex_private::extractors::json::JsonAdvanced;
+use once_cell::sync::Lazy;
+use polars::frame::DataFrame;
 
 use crate::{
     modules::app_charge::domain::{
@@ -21,6 +23,8 @@ use crate::{
     try_get_surreal_pool,
     utils::errors::csv_error::CsvError,
 };
+pub static DATA_FRAMES: Lazy<RwLock<HashMap<String, DataFrame>>> =
+    Lazy::new(|| RwLock::new(HashMap::new()));
 
 #[async_trait::async_trait]
 impl GetAllDataUseCaseTrait for GetAllDataUseCase {

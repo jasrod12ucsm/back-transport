@@ -9,5 +9,9 @@ pub struct ScatterPlotUseCase;
 
 #[async_trait::async_trait]
 pub trait ScatterPlotUseCaseTrait {
-    async fn execute(self, id: String) -> Result<JsonAdvanced<ScatterPlotResponse>, CsvError>;
+    async fn execute(
+        self,
+        id: String,
+        scatt: String,
+    ) -> Result<JsonAdvanced<ScatterPlotResponse>, CsvError>;
 }

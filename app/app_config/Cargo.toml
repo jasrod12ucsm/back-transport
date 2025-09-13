@@ -3,6 +3,10 @@ name = "app_config"
 version = "0.1.0"
 edition = "2024"
 
+[build]
+name = "app_config"
+crate_type = ["cdylib"]
+
 [dependencies]
 ntex = { version = "2.12.4", features = ["tokio"] }
 ntex-cors = "2.0.0"
@@ -30,3 +34,5 @@ validator = { version = "0.20.0", features = ["derive"] }
 itertools = "0.14.0"
 polars = {version = "0.50.0", features = ["lazy","strings","regex","timezones","round_series"]}
 rust_decimal = "1.37.1"
+lazy_static = "1.5.0"
+pyo3= {version = "0.26.0", features = ["extension-module"]}

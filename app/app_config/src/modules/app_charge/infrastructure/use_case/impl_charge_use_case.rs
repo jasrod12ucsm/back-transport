@@ -39,11 +39,14 @@ use minmaxlttb::{Lttb, LttbBuilder, LttbMethod, Point};
 use polars::{error::PolarsResult, frame::DataFrame, io::SerReader, prelude::*};
 
 use crate::{
-    modules::app_charge::domain::{
-        data::charge_dto::ChargeDto,
-        models::proyect_desnormalized::ProyectDesnormalized,
-        response::file_charge_response::FileChargeResponse,
-        use_case::charge_file_use_case::{ChargeFileUseCase, ChargeFileUseCaseTrait},
+    modules::app_charge::{
+        domain::{
+            data::charge_dto::ChargeDto,
+            models::proyect_desnormalized::ProyectDesnormalized,
+            response::file_charge_response::FileChargeResponse,
+            use_case::charge_file_use_case::{ChargeFileUseCase, ChargeFileUseCaseTrait},
+        },
+        infrastructure::use_case::impl_get_all_data_use_case::DATA_FRAMES,
     },
     try_get_surreal_pool,
     utils::{charge_models::void_struct::VoidStruct, errors::csv_error::CsvError},
@@ -69,6 +72,20 @@ impl ChargeFileUseCaseTrait for ChargeFileUseCase {
         let proyect = proyect.into_iter().next().unwrap();
 
         let (data, hashmap) = Self::process_files(dto).await?;
+        //ver si el dataframe esta cargado en memoria, si no cargarlo
+        //primero el hashmap debe teenr soolo un dataframe en memoria asi que elimina todos en el
+        //hashmap que no sea del dataframe
+
+        fn keep_only_key(key: &str, new_df: DataFrame) {
+            let mut map = DATA_FRAMES.write().unwrap();
+
+            // Si la key no existe, la agregamos
+            map.entry(key.to_string()).or_insert(new_df);
+
+            // Eliminamos todas las keys que no sean la especificada
+            map.retain(|k, _| k == key);
+        }
+        keep_only_key(proyect_id.as_str(), data.clone());
         println!("llego a procesar los datos");
         let count = (&data).height();
         let (features, data) = Self::profile_dataframe(&data, &hashmap).map_err(|e| {
@@ -79,16 +96,90 @@ impl ChargeFileUseCaseTrait for ChargeFileUseCase {
         //create features
         let created = Self::create_features_and_proyects(features, proyect_id, &conn).await?;
 
-        let continuous: Vec<&Feature> = created
-            .iter()
-            .filter(|f| matches!(f.type_feature, FeatureType::Continuous))
-            .collect();
-        Self::process_scatterplots(continuous, data, conn).await?;
-
         Ok(JsonAdvanced(FileChargeResponse { ok: true }))
     }
 }
 
+fn downsample_with_density(points: &[(f64, f64)], target: usize) -> Vec<ScatterContent> {
+    use rand::Rng;
+    use std::collections::HashMap;
+
+    // Calcular rangos
+    let (x_min, x_max) = points
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(min, max), &(x, _)| {
+            (min.min(x), max.max(x))
+        });
+
+    let (y_min, y_max) = points
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(min, max), &(_, y)| {
+            (min.min(y), max.max(y))
+        });
+
+    let x_range = x_max - x_min;
+    let y_range = y_max - y_min;
+
+    // Crear bins y calcular densidad
+    let n_bins = 50;
+    let bin_size_x = if x_range == 0.0 {
+        1.0
+    } else {
+        x_range / n_bins as f64
+    };
+    let bin_size_y = if y_range == 0.0 {
+        1.0
+    } else {
+        y_range / n_bins as f64
+    };
+
+    let mut density_map: HashMap<(i32, i32), usize> = HashMap::new();
+    let mut point_bins: Vec<((i32, i32), (f64, f64))> = Vec::with_capacity(points.len());
+
+    for &(x, y) in points {
+        let bin_x = ((x - x_min) / bin_size_x).floor() as i32;
+        let bin_y = ((y - y_min) / bin_size_y).floor() as i32;
+
+        *density_map.entry((bin_x, bin_y)).or_insert(0) += 1;
+        point_bins.push(((bin_x, bin_y), (x, y)));
+    }
+
+    // Encontrar densidad máxima
+    let max_density = *density_map.values().max().unwrap_or(&1) as f64;
+
+    // Muestreo probabilístico
+    let mut rng = rand::thread_rng();
+    let mut sampled_points = Vec::with_capacity(target);
+
+    for (bin, (x, y)) in point_bins {
+        let density = *density_map.get(&bin).unwrap_or(&1) as f64;
+        let prob = (target as f64) / (points.len() as f64 * (density / max_density).sqrt());
+
+        if rng.random::<f64>() < prob {
+            sampled_points.push((x, y));
+        }
+    }
+
+    // Ajustar tamaño final
+    if sampled_points.len() > target {
+        sampled_points.shuffle(&mut rng);
+        sampled_points.truncate(target);
+    } else if sampled_points.len() < 500 {
+        // Mínimo de puntos
+        let mut remaining: Vec<_> = points
+            .iter()
+            .filter(|p| !sampled_points.contains(p))
+            .cloned()
+            .collect();
+        remaining.shuffle(&mut rng);
+        sampled_points.extend(remaining.into_iter().take(500 - sampled_points.len()));
+    }
+
+    sampled_points
+        .into_iter()
+        .map(|(x, y)| ScatterContent { x, y })
+        .collect()
+}
 impl ChargeFileUseCase {
     async fn process_feature_pair(
         f1: Feature,
@@ -154,216 +245,15 @@ impl ChargeFileUseCase {
         points.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
 
         //points.dedup_by(|a, b| a.x() == b.x());
-
-        let content_scatter: Vec<ScatterContent>;
-        let min_points = 500; // mínimo para datasets pequeños
-        let max_points = 10000; // máximo para datasets grandes
-        let target_ratio = 0.03; // queremos tomar ~3% de los puntos
-
-        let mut target = (points.len() as f64 * target_ratio).ceil() as usize;
-        target = target.clamp(min_points, max_points);
-        let scatter_content: Vec<ScatterContent>;
-
-        if points.len() > 10000 {
-            let lazy_df = pair_df.clone().lazy();
-            let stats = lazy_df
-                .clone()
-                .select([
-                    col(f1_name).cast(DataType::Float64).min().alias("x_min"),
-                    col(f1_name).cast(DataType::Float64).max().alias("x_max"),
-                    col(f2_name).cast(DataType::Float64).min().alias("y_min"),
-                    col(f2_name).cast(DataType::Float64).max().alias("y_max"),
-                ])
-                .collect()
-                .map_err(|e| {
-                    println!("{:?}", e);
-                    CsvError::InvalidFileContent
-                })?;
-
-            let x_min = stats
-                .column("x_min")
-                .map_err(|e| {
-                    println!("{:?}", e);
-                    CsvError::InvalidFileContent
-                })?
-                .f64()
-                .map_err(|e| {
-                    println!("{:?}", e);
-                    CsvError::InvalidFileContent
-                })?
-                .get(0)
-                .unwrap_or(0.0);
-            let x_max = stats
-                .column("x_max")
-                .map_err(|e| {
-                    println!("{:?}", e);
-                    CsvError::InvalidFileContent
-                })?
-                .f64()
-                .map_err(|e| {
-                    println!("{:?}", e);
-                    CsvError::InvalidFileContent
-                })?
-                .get(0)
-                .unwrap_or(1.0);
-            let y_min = stats
-                .column("y_min")
-                .map_err(|e| {
-                    println!("{:?}", e);
-                    CsvError::InvalidFileContent
-                })?
-                .f64()
-                .map_err(|e| {
-                    println!("{:?}", e);
-                    CsvError::InvalidFileContent
-                })?
-                .get(0)
-                .unwrap_or(0.0);
-            let y_max = stats
-                .column("y_max")
-                .map_err(|e| {
-                    println!("{:?}", e);
-                    CsvError::InvalidFileContent
-                })?
-                .f64()
-                .map_err(|e| {
-                    println!("{:?}", e);
-                    CsvError::InvalidFileContent
-                })?
-                .get(0)
-                .unwrap_or(1.0);
-
-            let x_range = x_max - x_min;
-            let y_range = y_max - y_min;
-            let bin_size_x = if x_range == 0.0 { 1.0 } else { x_range / 50.0 };
-
-            let bin_size_y = if y_range == 0.0 { 1.0 } else { y_range / 50.0 };
-            let expr = (expr_col(f1_name).cast(DataType::Float64) - lit(x_min)) / lit(bin_size_x);
-            let binned_df = lazy_df
-                .with_column(expr.floor().cast(DataType::Int32).alias("bin_x"))
-                .with_column(
-                    ((col(f2_name).cast(DataType::Float64) - lit(y_min)) / lit(bin_size_y))
-                        .floor()
-                        .cast(DataType::Int32)
-                        .alias("bin_y"),
-                )
-                .group_by(["bin_x", "bin_y"])
-                .agg([col(f1_name).count().fill_null(lit(1)).alias("density")])
-                .collect()
-                .map_err(|e| {
-                    println!("{:?}", e);
-                    CsvError::InvalidFileContent
-                })?;
-            let joined_df = pair_df
-                .clone()
-                .lazy()
-                .with_column(
-                    ((col(f1_name).cast(DataType::Float64) - lit(x_min)) / lit(bin_size_x))
-                        .floor()
-                        .cast(DataType::Int32)
-                        .alias("bin_x"),
-                )
-                .with_column(
-                    ((col(f2_name).cast(DataType::Float64) - lit(y_min)) / lit(bin_size_y))
-                        .floor()
-                        .cast(DataType::Int32)
-                        .alias("bin_y"),
-                )
-                .join_builder()
-                .with(binned_df.lazy()) // tabla derecha
-                .how(JoinType::Left) // join izquierdo
-                .left_on(&[col("bin_x"), col("bin_y")]) // columnas izquierda
-                .right_on(&[col("bin_x"), col("bin_y")]) // columnas derecha
-                .finish()
-                .collect()
-                .map_err(|e| {
-                    println!("{:?}", e);
-                    CsvError::InvalidFileContent
-                })?;
-
-            // Extraer densidades
-            let density_col = joined_df
-                .column("density")
-                .map_err(|e| {
-                    println!("{:?}", e);
-                    CsvError::InvalidFileContent
-                })?
-                .u32()
-                .map_err(|e| {
-                    println!("{:?}", e);
-                    CsvError::InvalidFileContent
-                })?;
-            let max_density = density_col.max().unwrap_or(1) as f64;
-
-            // Muestreo probabilístico basado en densidad inversa
-            let mut rng = thread_rng();
-            let mut sampled_points = Vec::new();
-            let x_series = joined_df
-                .column(f1_name)
-                .map_err(|e| {
-                    println!("{:?}", e);
-                    CsvError::InvalidFileContent
-                })?
-                .cast(&DataType::Float64)
-                .map_err(|e| {
-                    println!("{:?}", e);
-                    CsvError::InvalidFileContent
-                })?;
-
-            let x_values = x_series
-                .f64()
-                .map_err(|e| {
-                    println!("{:?}", e);
-                    CsvError::InvalidFileContent
-                })?
-                .into_no_null_iter();
-
-            let y_series = joined_df
-                .column(f2_name)
-                .map_err(|e| {
-                    println!("{:?}", e);
-                    CsvError::InvalidFileContent
-                })?
-                .cast(&DataType::Float64)
-                .map_err(|e| {
-                    println!("{:?}", e);
-                    CsvError::InvalidFileContent
-                })?;
-
-            let y_values = y_series
-                .f64()
-                .map_err(|e| {
-                    println!("{:?}", e);
-                    CsvError::InvalidFileContent
-                })?
-                .into_no_null_iter();
-            for (idx, (x, y)) in x_values.zip(y_values).enumerate() {
-                let density = density_col.get(idx).unwrap_or(1) as f64;
-                let prob = (target as f64) / (points.len() as f64 * (density / max_density).sqrt());
-                if rng.random::<f64>() < prob {
-                    sampled_points.push((x.clone(), y.clone()));
-                }
-            }
-            if sampled_points.len() > target {
-                sampled_points.shuffle(&mut rng);
-                sampled_points.truncate(target);
-            } else if sampled_points.len() < min_points {
-                // Si no alcanzamos min_points, tomamos más puntos aleatoriamente
-                let mut remaining = points.clone();
-                remaining.shuffle(&mut rng);
-                let needed = min_points - sampled_points.len();
-                sampled_points.extend(remaining.into_iter().take(needed).map(|a| (a.x(), a.y())));
-            }
-            content_scatter = sampled_points
-                .iter()
-                .map(|p| ScatterContent { x: p.0, y: p.1 })
-                .collect()
+        let content_scatter = if points.len() > 10000 {
+            downsample_with_density(&points, 10000)
         } else {
-            content_scatter = points
+            points
                 .iter()
-                .map(|x| ScatterContent { x: x.x(), y: x.y() })
-                .collect();
-        }
+                .map(|(x, y)| ScatterContent { x: *x, y: *y })
+                .collect()
+        };
+
         let relate_request = RelateRequest::<FeatureToFeature>::builder()
             .from(&f1_id)
             .to(&f2_id)
@@ -380,7 +270,7 @@ impl ChargeFileUseCase {
         Ok(relate_request)
     }
 
-    async fn process_scatterplots(
+    pub async fn process_scatterplots(
         continuous: Vec<&Feature>,
         data: LazyFrame,
         conn: Surreal<Any>,
@@ -487,7 +377,7 @@ impl ChargeFileUseCase {
         println!("termino processing");
         Ok(())
     }
-    async fn process_files(
+    pub async fn process_files(
         mut data: MultipartData<ChargeDto>,
     ) -> Result<(DataFrame, HashMap<String, FeatureType>), CsvError> {
         println!("data {:?}", data.get_data());

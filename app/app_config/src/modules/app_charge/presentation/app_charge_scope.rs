@@ -7,6 +7,7 @@ pub fn app_charge_scope(cnf: &mut ServiceConfig) {
             .service(app_charge_controller::get_columns)
             .service(app_charge_controller::charge_file)
             .service(app_charge_controller::get_all_data)
-            .service(app_charge_controller::get_scat),
+            .service(app_charge_controller::get_scat)
+            .service(app_charge_controller::charge_field_scatt),
     );
 }

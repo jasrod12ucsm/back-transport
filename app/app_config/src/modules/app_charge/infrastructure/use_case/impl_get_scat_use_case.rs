@@ -17,7 +17,11 @@ use crate::{
 
 #[async_trait::async_trait]
 impl ScatterPlotUseCaseTrait for ScatterPlotUseCase {
-    async fn execute(self, id: String) -> Result<JsonAdvanced<ScatterPlotResponse>, CsvError> {
+    async fn execute(
+        self,
+        id: String,
+        scatt: String,
+    ) -> Result<JsonAdvanced<ScatterPlotResponse>, CsvError> {
         let db = try_get_surreal_pool()
             .ok_or_else(|| CsvError::FileChargeError)?
             .get()
@@ -28,14 +32,15 @@ impl ScatterPlotUseCaseTrait for ScatterPlotUseCase {
             })?;
         let param = json!(
         {
-            "project_id": format!("mst_proyect:{}", id)
+            "project_id": format!("mst_proyect:{}", id),
+            "feature_id": format!("mst_feature:{}",scatt)
         }
         );
         let conn = &db.client;
         let mut features = conn
             .query(
                 "SELECT * 
-FROM mst_feature
+FROM <recorsd>$feature_id
 WHERE <-mst_proyect_feature<-mst_proyect CONTAINS <record>$project_id;",
             )
             .bind(param.clone())
