@@ -28,7 +28,7 @@ dependencies = [
 [[package]]
 name = "ac_struct_back"
 version = "0.1.0"
-source = "git+https://github.com/jasrod12ucsm/abt_struct.git?tag=v0.1.017#dfd92ae8ce1a0d7c55236834682a75cc9dd55847"
+source = "git+https://github.com/jasrod12ucsm/abt_struct.git?tag=v0.1.026#4ea3ea679118d3a072e7daed4e0181df91c2343c"
 dependencies = [
  "ac_procedures",
  "ahash 0.8.12",
@@ -355,7 +355,7 @@ dependencies = [
 name = "app_config"
 version = "0.1.0"
 dependencies = [
- "ac_struct_back 0.1.0 (git+https://github.com/jasrod12ucsm/abt_struct.git?tag=v0.1.017)",
+ "ac_struct_back 0.1.0 (git+https://github.com/jasrod12ucsm/abt_struct.git?tag=v0.1.026)",
  "ahash 0.8.12",
  "aho-corasick 1.1.3",
  "async-trait",

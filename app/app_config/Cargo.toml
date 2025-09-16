@@ -15,7 +15,7 @@ once_cell = "1.21.3"
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
 common = { path = "../../common" }
-ac_struct_back = { git = "https://github.com/jasrod12ucsm/abt_struct.git", package = "ac_struct_back",tag = "v0.1.017" }
+ac_struct_back = { git = "https://github.com/jasrod12ucsm/abt_struct.git", package = "ac_struct_back",tag = "v0.1.026" }
 surrealdb = { version = "2.3.8", features = ["allocator", "kv-mem", "kv-surrealkv", "kv-rocksdb", "protocol-http", "protocol-ws", "rustls"] }
 futures = "0.3.31"
 tokio = { version = "1.45.1", features = ["macros", "rt-multi-thread"] }
@@ -35,4 +35,4 @@ itertools = "0.14.0"
 polars = {version = "0.50.0", features = ["lazy","strings","regex","timezones","round_series"]}
 rust_decimal = "1.37.1"
 lazy_static = "1.5.0"
-pyo3= {version = "0.26.0", features = ["extension-module"]}
+pyo3= {version = "0.26.0", features = ["auto-initialize"]}

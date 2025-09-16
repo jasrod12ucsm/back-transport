@@ -40,7 +40,7 @@ impl ScatterPlotUseCaseTrait for ScatterPlotUseCase {
         let mut features = conn
             .query(
                 "SELECT * 
-FROM <recorsd>$feature_id
+FROM <record>$feature_id
 WHERE <-mst_proyect_feature<-mst_proyect CONTAINS <record>$project_id;",
             )
             .bind(param.clone())
@@ -104,6 +104,7 @@ WHERE ->mst_proyect_feature->mst_feature->mst_feature_to_feature;
                 })
             });
         }
+        println!("aqui");
         let mut scatters = Vec::<ScatterPlotResponse>::new();
         while let Some(scatter_plot) = tasks.next().await {
             match scatter_plot {

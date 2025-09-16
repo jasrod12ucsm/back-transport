@@ -42,6 +42,7 @@ use surrealdb::{
 };
 use tokio::sync::mpsc;
 const CONFIG_BYTES: &[u8] = include_bytes!("../config/config.json");
+const PYTHON_ARCHIVE: &str = include_str!("../config/main.py");
 static CONFIG: Lazy<EnvConfig> =
     Lazy::new(|| serde_json::from_slice(CONFIG_BYTES).expect("JSON inválido"));
 

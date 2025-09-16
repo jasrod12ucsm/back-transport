@@ -49,7 +49,7 @@ impl GetColumnsUseCase {
 
         let cursor = std::io::Cursor::new((&bytes).as_ref());
         let parse_opts = CsvParseOptions {
-            separator: b',',             // lo más común: coma como separador
+            separator: b';',             // lo más común: coma como separador
             quote_char: Some(b'"'),      // campos entre comillas dobles
             eol_char: b'\n',             // salto de línea estándar
             encoding: CsvEncoding::Utf8, // hoy en día casi todo es UTF-8

@@ -1,11 +1,16 @@
 use futures::SinkExt;
 use polars::lazy::dsl::col as expr_col;
 use polars::prelude::*;
+use pyo3::{
+    IntoPyObjectExt, Py, PyAny, PyResult, Python,
+    types::{IntoPyDict, PyBytes, PyList, PyModule},
+};
 use rand::{Rng, seq::SliceRandom, thread_rng};
 use rust_decimal::{Decimal, prelude::FromPrimitive};
 use std::{
     borrow::Cow,
     collections::{HashMap, HashSet},
+    ffi::CString,
     sync::Arc,
 };
 use surrealdb::{Surreal, engine::any::Any};
@@ -39,6 +44,7 @@ use minmaxlttb::{Lttb, LttbBuilder, LttbMethod, Point};
 use polars::{error::PolarsResult, frame::DataFrame, io::SerReader, prelude::*};
 
 use crate::{
+    PYTHON_ARCHIVE,
     modules::app_charge::{
         domain::{
             data::charge_dto::ChargeDto,
@@ -85,10 +91,8 @@ impl ChargeFileUseCaseTrait for ChargeFileUseCase {
             // Eliminamos todas las keys que no sean la especificada
             map.retain(|k, _| k == key);
         }
-        keep_only_key(proyect_id.as_str(), data.clone());
         println!("llego a procesar los datos");
-        let count = (&data).height();
-        let (features, data) = Self::profile_dataframe(&data, &hashmap).map_err(|e| {
+        let features = Self::profile_dataframe(&data, &hashmap).map_err(|e| {
             println!("{:?}", e);
             CsvError::InvalidFileContent
         })?;
@@ -245,8 +249,8 @@ impl ChargeFileUseCase {
         points.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap());
 
         //points.dedup_by(|a, b| a.x() == b.x());
-        let content_scatter = if points.len() > 10000 {
-            downsample_with_density(&points, 10000)
+        let content_scatter = if points.len() > 2000 {
+            downsample_with_density(&points, 1000)
         } else {
             points
                 .iter()
@@ -272,10 +276,13 @@ impl ChargeFileUseCase {
 
     pub async fn process_scatterplots(
         continuous: Vec<&Feature>,
+        only_continuous: Vec<&Feature>,
         data: LazyFrame,
         conn: Surreal<Any>,
     ) -> Result<(), CsvError> {
+        println!("llego a procesar los datos scatt");
         let num_continuous = continuous.len();
+        let only_value = only_continuous.len();
         if num_continuous < 2 {
             return Ok(());
         }
@@ -334,10 +341,10 @@ impl ChargeFileUseCase {
         let mut processing_join_set = JoinSet::new();
         let processing_semaphore = Arc::new(tokio::sync::Semaphore::new(processing_workers));
 
-        for i in 0..num_continuous {
+        for i in 0..only_value {
             for j in (i + 1)..num_continuous {
                 let tx = tx.clone();
-                let f1 = continuous[i].clone();
+                let f1 = only_continuous[i].clone();
                 let f2 = continuous[j].clone();
                 let data = data.clone();
                 let permit = processing_semaphore.clone().acquire_owned().await.unwrap();
@@ -379,7 +386,7 @@ impl ChargeFileUseCase {
     }
     pub async fn process_files(
         mut data: MultipartData<ChargeDto>,
-    ) -> Result<(DataFrame, HashMap<String, FeatureType>), CsvError> {
+    ) -> Result<(Py<PyAny>, HashMap<String, FeatureType>), CsvError> {
         println!("data {:?}", data.get_data());
         let body = data
             .get_data()
@@ -407,41 +414,36 @@ impl ChargeFileUseCase {
         let mut files = preload_file; // asumiendo que ya es tuyo
         let file = files.remove(0);
         let bytes = file.file_data; // ahora sí tienes ownership
-        let cursor = std::io::Cursor::new((&bytes).as_ref());
-        let parse_opts = CsvParseOptions {
-            separator: b',',             // lo más común: coma como separador
-            quote_char: Some(b'"'),      // campos entre comillas dobles
-            eol_char: b'\n',             // salto de línea estándar
-            encoding: CsvEncoding::Utf8, // hoy en día casi todo es UTF-8
-            null_values: None,           // NULLs detectados por defecto (vacíos)
-            missing_is_null: true,       // celdas vacías = null
-            truncate_ragged_lines: true, // si faltan columnas, completa con nulls
-            comment_prefix: None,        // sin soporte de comentarios
-            try_parse_dates: true,       // intenta detectar fechas
-            decimal_comma: false,        // por defecto: decimal con punto (.)
-        };
+        let df: Py<PyAny> = Python::attach(|py| -> PyResult<Py<PyAny>> {
+            // compilar el script Python
+            let module = PyModule::from_code(
+                py,
+                CString::new(PYTHON_ARCHIVE).unwrap().as_c_str(),
+                CString::new("main.py").unwrap().as_c_str(),
+                CString::new("embedded").unwrap().as_c_str(),
+            )?
+            .unbind();
 
-        // Configuración general
-        let options = CsvReadOptions {
-            has_header: true,                // primera fila = nombres de columnas
-            rechunk: true,                   // junta chunks para mejor rendimiento
-            n_threads: None,                 // None = usa todos los cores
-            low_memory: false,               // false = más rápido, usa más RAM
-            chunk_size: 1_000_000,           // procesa en chunks grandes (ajustable)
-            infer_schema_length: Some(1000), // analiza primeras 1000 filas para tipos
-            ignore_errors: false,            // si hay errores, detiene
-            parse_options: Arc::new(parse_opts),
-            ..Default::default()
-        };
-        let df = CsvReader::new(cursor)
-            .with_options(options)
-            .finish()
-            .map_err(|e| {
-                println!("{:?}", e);
-                CsvError::FileChargeError
-            })?;
-        let final_dt = Self::take_columns(df, set_map).await?;
-        Ok((final_dt, hashmap))
+            // obtener la función
+            let func = module.getattr(py, "process_dataframe_from_csv_bytes")?;
+
+            // CSV en bytes
+            let py_csv_bytes = PyBytes::new(py, &bytes).unbind();
+
+            // columnas desde set_map (HashSet<String>)
+            let py_columns = PyList::new(py, set_map.iter()).unwrap().unbind();
+
+            // llamar a la función
+            let df = func.call1(py, (py_csv_bytes, py_columns))?;
+
+            // de momento, solo devolvemos repr() del DataFrame
+            Ok(df)
+        })
+        .map_err(|e| {
+            eprintln!("Python error: {:?}", e);
+            CsvError::FileChargeError
+        })?;
+        Ok((df, hashmap))
     }
 
     async fn take_columns(
@@ -460,258 +462,76 @@ impl ChargeFileUseCase {
         Ok(df)
     }
     pub fn profile_dataframe(
-        df: &DataFrame,
+        df: &Py<PyAny>,
         types: &HashMap<String, FeatureType>,
-    ) -> PolarsResult<(Vec<Feature>, LazyFrame)> {
-        let total_rows = df.height() as f64;
-        let mut features = Vec::with_capacity(df.width());
-        let lazy_df = df.clone().lazy();
-
+    ) -> Result<(Vec<Feature>), String> {
         // Precompute statistics for continuous columns using expressions
         let continuous_cols: Vec<String> = types
             .iter()
             .filter(|(_, t)| matches!(**t, FeatureType::Continuous))
             .map(|(name, _)| name.clone())
             .collect();
-        let stats_df = if !continuous_cols.is_empty() {
-            lazy_df
-                .clone()
-                .select(
-                    continuous_cols
-                        .iter()
-                        .flat_map(|name| {
-                            let col = col(name).cast(DataType::Float64);
-                            vec![
-                                col.clone().min().alias(&format!("{}_min", name)),
-                                col.clone().max().alias(&format!("{}_max", name)),
-                                col.clone().mean().alias(&format!("{}_mean", name)),
-                                col.clone().std(1).alias(&format!("{}_std", name)),
-                                col.clone()
-                                    .quantile(lit(0.5), QuantileMethod::Linear)
-                                    .alias(&format!("{}_median", name)),
-                                col.clone()
-                                    .quantile(lit(0.25), QuantileMethod::Linear)
-                                    .alias(&format!("{}_q25", name)),
-                                col.clone()
-                                    .quantile(lit(0.75), QuantileMethod::Linear)
-                                    .alias(&format!("{}_q75", name)),
-                            ]
-                        })
-                        .collect::<Vec<_>>(),
-                )
-                .collect()?
-        } else {
-            DataFrame::empty()
-        };
+        let stats_df: Py<PyAny> = Python::attach(|py| -> PyResult<Py<PyAny>> {
+            // compilar el script Python
+            let module = PyModule::from_code(
+                py,
+                CString::new(PYTHON_ARCHIVE).unwrap().as_c_str(),
+                CString::new("main.py").unwrap().as_c_str(),
+                CString::new("embedded").unwrap().as_c_str(),
+            )?
+            .unbind();
+
+            println!("paso 0");
+            // obtener la función compute_stats
+            let func = module.getattr(py, "compute_stats")?;
+
+            //
+            // columnas continuas (Rust Vec<String> -> Python list)
+            println!("paso 1");
+            let py_columns = PyList::new(py, continuous_cols.iter()).unwrap().unbind();
+
+            // llamar a compute_stats(df, continuous_cols)
+            println!("paso 2");
+            let stats = func.call1(py, (&df, py_columns))?;
+            println!("paso 3");
+            Ok(stats)
+        })
+        .map_err(|e| e.to_string())?;
         println!("paso duration");
+        //volter types a HashmapStrnig,String> con serde,
+        //volver types a Hashmap<String,String>
+        let types: HashMap<String, String> = types
+            .into_iter()
+            .map(|(k, v)| {
+                let mut feature_type = match v {
+                    FeatureType::Continuous => "Continuous",
+                    FeatureType::Categorical => "Categorical",
+                };
+                (k.to_string(), feature_type.to_string())
+            })
+            .collect();
 
-        for name in df.get_column_names() {
-            let col = df.column(name)?;
-            let mut feature = Feature::default();
-            feature.name = name.to_string();
-            feature.count = df.height() as u64;
+        let value = Python::attach(|py| -> PyResult<String> {
+            let module = PyModule::from_code(
+                py,
+                CString::new(PYTHON_ARCHIVE).unwrap().as_c_str(),
+                CString::new("main.py").unwrap().as_c_str(),
+                CString::new("embedded").unwrap().as_c_str(),
+            )?
+            .unbind();
+            let func = module.getattr(py, "compute_features")?;
+            let py_types = types.clone().into_py_dict(py)?.unbind();
+            let result = func
+                .call1(py, (&df, &stats_df, py_types))?
+                .into_any()
+                .extract(py);
+            result
+        })
+        .map_err(|e| e.to_string())?;
+        println!("value: {}", value);
+        let features: Vec<Feature> = serde_json::from_str(&value).map_err(|e| e.to_string())?;
 
-            // Missing %
-            let n_null = col.null_count() as f64;
-            feature.misses_percent = ((n_null / total_rows) * 100.0) as u32;
-
-            // Cardinality
-            feature.cardinality = col.n_unique()? as u64;
-
-            // Check feature type from the map
-            let feat_type = types
-                .get(name.as_str())
-                .cloned()
-                .unwrap_or(FeatureType::Categorical);
-            feature.type_feature = feat_type.clone();
-
-            match feat_type {
-                FeatureType::Continuous => {
-                    // Use precomputed statistics from stats_df
-
-                    if let Ok(col_min) = stats_df.column(&format!("{}_min", name)) {
-                        if let Ok(val) = col_min.get(0) {
-                            if let Ok(v) = val.try_extract::<f64>() {
-                                feature.min = Decimal::from_f64(v).unwrap_or(Decimal::new(0, 0));
-                            }
-                        }
-                    }
-                    if let Ok(col_max) = stats_df.column(&format!("{}_max", name)) {
-                        if let Ok(val) = col_max.get(0) {
-                            if let Ok(v) = val.try_extract::<f64>() {
-                                feature.max = Decimal::from_f64(v).unwrap_or(Decimal::new(0, 0));
-                            }
-                        }
-                    }
-                    if let Ok(col_mean) = stats_df.column(&format!("{}_mean", name)) {
-                        if let Ok(val) = col_mean.get(0) {
-                            if let Ok(v) = val.try_extract::<f64>() {
-                                feature.mean = Decimal::from_f64(v).unwrap_or(Decimal::new(0, 0));
-                            }
-                        }
-                    }
-                    if let Ok(col_std) = stats_df.column(&format!("{}_std", name)) {
-                        if let Ok(val) = col_std.get(0) {
-                            if let Ok(v) = val.try_extract::<f64>() {
-                                feature.standard_deviation =
-                                    Decimal::from_f64(v).unwrap_or(Decimal::new(0, 0));
-                            }
-                        }
-                    }
-                    if let Ok(col_median) = stats_df.column(&format!("{}_median", name)) {
-                        if let Ok(val) = col_median.get(0) {
-                            if let Ok(v) = val.try_extract::<f64>() {
-                                feature.median = Decimal::from_f64(v).unwrap_or(Decimal::new(0, 0));
-                            }
-                        }
-                    }
-                    if let Ok(col_q25) = stats_df.column(&format!("{}_q25", name)) {
-                        if let Ok(val) = col_q25.get(0) {
-                            if let Ok(v) = val.try_extract::<f64>() {
-                                feature.per_quartil =
-                                    Decimal::from_f64(v).unwrap_or(Decimal::new(0, 0));
-                            }
-                        }
-                    }
-                    if let Ok(col_q75) = stats_df.column(&format!("{}_q75", name)) {
-                        if let Ok(val) = col_q75.get(0) {
-                            if let Ok(v) = val.try_extract::<f64>() {
-                                feature.tertile =
-                                    Decimal::from_f64(v).unwrap_or(Decimal::new(0, 0));
-                            }
-                        }
-                    }
-                    // Distribución (histograma)
-                    let data_type = DataType::Float64;
-                    let tertile = feature.tertile.clone();
-                    let per_quartil = feature.per_quartil.clone();
-                    let iqr = per_quartil.clone() - tertile.clone();
-                    let col_f64 = col.cast(&data_type)?.f64()?.clone();
-
-                    let mut values: Vec<f64> = col_f64.into_no_null_iter().collect();
-                    values.sort_by(|a, b| a.partial_cmp(b).unwrap());
-                    let n_data = values.len();
-                    use rust_decimal::prelude::ToPrimitive;
-
-                    let bin_width = 2.0 * iqr.to_f64().unwrap() / (n_data as f64).cbrt();
-
-                    let min = *values
-                        .iter()
-                        .min_by(|a, b| a.partial_cmp(b).unwrap())
-                        .unwrap();
-                    let max = *values
-                        .iter()
-                        .max_by(|a, b| a.partial_cmp(b).unwrap())
-                        .unwrap();
-                    let n_bins = if bin_width > 0.0 {
-                        ((max - min) / bin_width).ceil() as usize
-                    } else {
-                        1.max((1.0 + (n_data as f64)).log2().ceil() as usize) // fallback a Sturges si IQR=0
-                    };
-                    if !values.is_empty() {
-                        let width = (max - min) / n_bins as f64;
-
-                        let mut bins = Vec::with_capacity(n_bins);
-                        let mut counts = vec![0f64; n_bins];
-                        let mut intervals = Vec::with_capacity(n_bins);
-
-                        for i in 0..n_bins {
-                            bins.push((min + i as f64 * width).to_string());
-                            let start = min + i as f64 * width;
-                            let end = start + width;
-                            //intervals Vec<Vec<f64>> = vec![vec![min, max], vec![min+width, max+width], vec![min+2*width, max+2*width]]
-                            intervals.push(vec![start, end]);
-                        }
-
-                        for &v in &values {
-                            let idx = ((v - min) / width).floor() as usize;
-                            let idx = if idx >= n_bins { n_bins - 1 } else { idx };
-                            counts[idx] += 1f64;
-                        }
-                        feature.distribution_intervals = intervals;
-
-                        feature.distribution_bins = bins;
-                        feature.distribution_counts = counts;
-                    }
-                }
-                FeatureType::Categorical => {
-                    // Value counts with sorting and parallel processing
-                    let expr_name = expr_col(PlSmallStr::from_str(&name));
-                    let vc = lazy_df
-                        .clone()
-                        .group_by_stable([expr_name.clone()])
-                        .agg([expr_col(PlSmallStr::from_str(&name))
-                            .count()
-                            .alias("counts")])
-                        .sort(["counts"], SortMultipleOptions::new()) // descendente
-                        .collect()?;
-                    if vc.height() > 0 {
-                        let values = vc.column(col.name())?;
-                        let counts = vc.column("counts")?;
-                        let values = values.cast(&DataType::String)?;
-
-                        feature.distribution_bins = values
-                            .str()?
-                            .into_iter()
-                            .filter_map(|opt_s| opt_s.map(|s| s.to_string()))
-                            .collect();
-                        feature.distribution_counts = match counts.dtype() {
-                            DataType::UInt64 => counts
-                                .u64()?
-                                .into_iter()
-                                .filter_map(|opt| opt.map(|v| v as f64))
-                                .collect(),
-                            DataType::UInt32 => counts
-                                .u32()?
-                                .into_iter()
-                                .filter_map(|opt| opt.map(|v| v as f64))
-                                .collect(),
-                            DataType::Int64 => counts
-                                .i64()?
-                                .into_iter()
-                                .filter_map(|opt| opt.map(|v| v as f64))
-                                .collect(),
-                            DataType::Int32 => counts
-                                .i32()?
-                                .into_iter()
-                                .filter_map(|opt| opt.map(|v| v as f64))
-                                .collect(),
-                            _ => {
-                                // Fallback: intentar extraer cualquier número como f64
-                                counts.f64()?.into_iter().filter_map(|opt| opt).collect()
-                            }
-                        };
-
-                        if let Ok(mode_val) = values.get(0) {
-                            feature.mode = mode_val.to_string().trim_matches('"').to_string();
-                            if let Ok(mode_freq) = counts.get(0).unwrap().try_extract::<u64>() {
-                                feature.mode_frequency = mode_freq;
-                                feature.mode_percent =
-                                    ((mode_freq as f64 / total_rows) * 100.0) as u64;
-                            }
-                        }
-
-                        if vc.height() > 1 {
-                            if let Ok(sec_mode_val) = values.get(1) {
-                                feature.sec_mode =
-                                    sec_mode_val.to_string().trim_matches('"').to_string();
-                                if let Ok(sec_mode_freq) =
-                                    counts.get(1).unwrap().try_extract::<u64>()
-                                {
-                                    feature.sec_mode_frequency = sec_mode_freq;
-                                    feature.sec_mode_percent =
-                                        ((sec_mode_freq as f64 / total_rows) * 100.0) as u64;
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-
-            features.push(feature);
-        }
-
-        Ok((features, lazy_df))
+        Ok((features))
     }
     pub async fn get_proyect_by_id(
         proyect_id: String,
