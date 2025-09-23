@@ -260,6 +260,11 @@ impl ChargeContinuousCategoricalUseCase {
             .iter()
             .map(|x| x.name.clone())
             .collect::<HashSet<String>>();
+        let body = data
+            .get_data()
+            .ok_or_else(|| CsvError::FileChargeError)?
+            .clone();
+        let separator = body.separator.unwrap_or(",".to_string());
         let df: Py<PyAny> = Python::attach(|py| -> PyResult<Py<PyAny>> {
             let module = PyModule::from_code(
                 py,
@@ -272,10 +277,11 @@ impl ChargeContinuousCategoricalUseCase {
             let func = module.getattr(py, "process_dataframe_from_csv_bytes")?;
 
             let py_csv_bytes = PyBytes::new(py, &bytes).unbind();
+            let py_separator_str = PyString::new(py, &separator).unbind();
 
             let py_columns = PyList::new(py, set_map.clone().iter()).unwrap().unbind();
 
-            let df = func.call1(py, (py_csv_bytes, py_columns))?;
+            let df = func.call1(py, (py_csv_bytes, py_columns, py_separator_str))?;
 
             Ok(df)
         })

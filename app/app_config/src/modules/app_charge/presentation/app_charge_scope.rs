@@ -10,6 +10,8 @@ pub fn app_charge_scope(cnf: &mut ServiceConfig) {
             .service(app_charge_controller::get_scat)
             .service(app_charge_controller::charge_field_scatt)
             .service(app_charge_controller::charge_categoricals)
-            .service(app_charge_controller::charge_continous),
+            .service(app_charge_controller::charge_continous)
+            .service(app_charge_controller::get_categorical_plot)
+            .service(app_charge_controller::get_continous_categorical),
     );
 }

@@ -52,12 +52,16 @@ impl ChargeCategoricalUseCaseTrait for CHargeCategoricalUseCase {
                 CsvError::FileChargeError
             })?;
         let conn = db.client.clone();
+        println!("llego a procesar los datos scatt");
         let features = Self::get_featurees_for_proyect(proyect_id.clone(), &conn).await?;
+        println!("paso 1");
         let (data, set_map) = Self::process_files(data, proyect_id.clone(), &conn).await?;
+        println!("paso 2");
         //ver si el dataframe esta cargado en memoria, si no cargarlo
         //primero el hashmap debe teenr soolo un dataframe en memoria asi que elimina todos en el
         //hashmap que no sea del dataframe
         let relate_requests = Self::process_categorical(features, data, conn).await?;
+        println!("paso 3");
         Ok(JsonAdvanced(FileChargeResponse { ok: true }))
     }
 }
@@ -193,7 +197,10 @@ impl CHargeCategoricalUseCase {
         let data = Arc::new(data);
 
         for i in 0..num_categorical {
-            for j in (i + 1)..num_categorical {
+            for j in 0..num_categorical {
+                if i == j {
+                    continue;
+                }
                 let tx = tx.clone();
                 let f1 = cats[i].clone();
                 let f2 = cats[j].clone();
@@ -258,6 +265,11 @@ impl CHargeCategoricalUseCase {
             .iter()
             .map(|x| x.name.clone())
             .collect::<HashSet<String>>();
+        let body = data
+            .get_data()
+            .ok_or_else(|| CsvError::FileChargeError)?
+            .clone();
+        let separator = body.separator.unwrap_or(",".to_string());
         let df: Py<PyAny> = Python::attach(|py| -> PyResult<Py<PyAny>> {
             // compilar el script Python
             let module = PyModule::from_code(
@@ -270,7 +282,7 @@ impl CHargeCategoricalUseCase {
 
             // obtener la función
             let func = module.getattr(py, "process_dataframe_from_csv_bytes")?;
-
+            let py_separator_str = PyString::new(py, &separator).unbind();
             // CSV en bytes
             let py_csv_bytes = PyBytes::new(py, &bytes).unbind();
 
@@ -278,7 +290,7 @@ impl CHargeCategoricalUseCase {
             let py_columns = PyList::new(py, set_map.clone().iter()).unwrap().unbind();
 
             // llamar a la función
-            let df = func.call1(py, (py_csv_bytes, py_columns))?;
+            let df = func.call1(py, (py_csv_bytes, py_columns, py_separator_str))?;
 
             // de momento, solo devolvemos repr() del DataFrame
             Ok(df)

@@ -17,6 +17,8 @@ impl GetContinuousCategoricalUseCaseTrait for GetContinuousCategoricalUseCase {
     async fn execute(
         &self,
         proyect_id: String,
+        feature_id: String,
+        real_num_page: i32,
     ) -> Result<JsonAdvanced<ContinousCategoricalResponse>, CsvError> {
         let db = try_get_surreal_pool()
             .ok_or_else(|| CsvError::FileChargeError)?
@@ -27,10 +29,12 @@ impl GetContinuousCategoricalUseCaseTrait for GetContinuousCategoricalUseCase {
                 CsvError::FileChargeError
             })?;
         let conn = db.client.clone();
-
+        let start = (real_num_page - 1) * 3;
         let param = json!(
         {
             "project_id": format!("mst_proyect:{}", proyect_id),
+            "feature_id": format!("mst_feature:{}",feature_id),
+            "static": start,
         }
         );
         let mut value = conn
@@ -45,11 +49,11 @@ SELECT (
             SELECT
                 out,
                 content,
-                ->mst_feature.name[0] AS name
-            FROM mst_continous_to_categorical
+                <->mst_feature.name[0] AS name
+            FROM mst_continous_to_categorical where in = $parent.id OR out= $parent.id START AT $static LIMIT 3
         ).{out, content, name} AS scatter
-    FROM mst_feature
-    WHERE ->mst_categorical_to_categorical
+    FROM <record>$feature_id
+    WHERE <->mst_continous_to_categorical
 ) AS features
 FROM ONLY <record>$project_id
 WHERE ->mst_proyect_feature->mst_feature->mst_continous_to_categorical;

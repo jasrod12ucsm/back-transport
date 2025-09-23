@@ -11,5 +11,7 @@ pub trait GetContinuousCategoricalUseCaseTrait {
     async fn execute(
         &self,
         proyect_id: String,
+        feature_id: String,
+        real_num_page: i32,
     ) -> Result<JsonAdvanced<ContinousCategoricalResponse>, CsvError>;
 }

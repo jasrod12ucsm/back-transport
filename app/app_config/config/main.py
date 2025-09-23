@@ -3,7 +3,7 @@ import numpy as np
 import json
 import datetime as datetime
 
-def process_dataframe_from_csv_bytes(csv_bytes: bytes, columns: list[str] | None = None):
+def process_dataframe_from_csv_bytes(csv_bytes: bytes, columns: list[str] | None = None,separator: str = ","):
     """Lee un CSV desde bytes con configuración detallada y selecciona columnas."""
     print("Procesando DataFrame desde bytes CSV...")
 
@@ -11,7 +11,7 @@ def process_dataframe_from_csv_bytes(csv_bytes: bytes, columns: list[str] | None
         csv_bytes,                # <- directamente bytes
         has_header=True,          # primera fila son nombres de columnas
         columns=columns,          # selecciona solo las columnas que Rust manda
-        separator=";",            # separador por defecto
+        separator=separator,            # separador por defecto
         quote_char='"',           # campos entre comillas
         eol_char="\n",            # salto de línea estándar
         encoding="utf8",          # UTF-8
@@ -62,6 +62,7 @@ def compute_features(df: pl.DataFrame, stats_df: pl.DataFrame, types: dict[str, 
     stats = {col: stats_df[col][0] for col in stats_df.columns}
 
     for name in df.columns:
+        print(name)
         col = df[name]
         type_feature = types.get(name, "Categorical")
         misses_percent = int(round(col.null_count() / total_rows * 100)) if total_rows else 0
@@ -108,21 +109,29 @@ def compute_features(df: pl.DataFrame, stats_df: pl.DataFrame, types: dict[str, 
             if n_bins > 0 and n > 0:
                 # Vectorized bin assignment
                 idxs = ((series_non_null - min_v) / width).floor().clip(0, n_bins - 1).cast(pl.Int64)
-                counts = idxs.value_counts().sort("values")  # values=bin index
+                print(idxs.value_counts())
+                counts = idxs.value_counts().sort(name)  # values=bin index
                 counts_array = np.zeros(n_bins, dtype=int)
-                counts_array[counts["values"].to_numpy()] = counts["counts"].to_numpy()
+                counts_array[counts[name].to_numpy()] = counts["count"].to_numpy()
             else:
                 counts_array = np.zeros(n_bins, dtype=int)
 
             feature["distribution_bins"] = [str(min_v + i * width) for i in range(n_bins)]
             feature["distribution_intervals"] = [[float(min_v + i * width), float(min_v + (i + 1) * width)] for i in range(n_bins)]
             feature["distribution_counts"] = counts_array.tolist()
+            feature["mode"]= ""
+            feature["mode_frequency"]= 0
+            feature["mode_percent"]= 0
+            feature["sec_mode"]= ""
+            feature["sec_mode_frequency"]= 0
+            feature["sec_mode_percent"]= 0
 
         else:  # Categorical
             vc = df.lazy().group_by(name).agg(pl.count().alias("counts")).sort("counts", descending=True).collect(engine='gpu')
             values = vc[name].to_list()
             counts = vc["counts"].to_list()
             feature.update({
+                "distribution_intervals":[],
                 "distribution_bins": [str(v) for v in values],
                 "distribution_counts": [float(c) for c in counts],
                 "mode": str(values[0]) if counts else "",
@@ -130,7 +139,14 @@ def compute_features(df: pl.DataFrame, stats_df: pl.DataFrame, types: dict[str, 
                 "mode_percent": int(counts[0] / total_rows * 100) if counts else 0,
                 "sec_mode": str(values[1]) if len(counts) > 1 else "",
                 "sec_mode_frequency": int(counts[1]) if len(counts) > 1 else 0,
-                "sec_mode_percent": int(counts[1] / total_rows * 100) if len(counts) > 1 else 0
+                "sec_mode_percent": int(counts[1] / total_rows * 100) if len(counts) > 1 else 0,
+                "min":"0.0",
+                "max":"0.0",
+                "mean":"0.0",
+                "standard_deviation":"0.0",
+                "median":"0.0",
+                "per_quartil":"0.0",
+                "tertile":"0.0"
             })
 
         features.append(feature)
@@ -164,6 +180,8 @@ def category_density_tables(df: pl.DataFrame, category_col: str, target_col: str
 
     # extraer meta (categorías principales)
     meta = pivoted[category_col].to_list()
+    for i in range(len(meta)):
+        meta[i] = str(meta[i])
 
     # extraer x como lista de listas (solo densidades)
     x = pivoted.drop(category_col).to_numpy().tolist()
@@ -172,8 +190,8 @@ def category_density_tables(df: pl.DataFrame, category_col: str, target_col: str
     legend = []
     for val in pivoted.drop(category_col).columns:
         legend.append({
-            "nombre": val,
-            "color": f"{random.randint(0,255)},{random.randint(0,255)},{random.randint(0,255)}"
+            "nombre": str(val),
+            "color": _deterministic_rgb(val)
         })
     now_str = '2025-08-27T15:18:35.883Z'
     print(json.dumps({

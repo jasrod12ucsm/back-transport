@@ -34,6 +34,11 @@ impl GetColumnsUseCase {
     async fn process_files(
         mut data: MultipartData<VoidStruct>,
     ) -> Result<Vec<PlSmallStr>, CsvError> {
+        let body = data
+            .get_data()
+            .ok_or_else(|| CsvError::FileChargeError)?
+            .clone();
+        let separator = body.separator.unwrap_or(",".to_string());
         let preload_file = data.take_files().ok_or_else(|| CsvError::FileChargeError)?;
         if preload_file.is_empty() || preload_file.len() > 1 {
             return Err(CsvError::FileChargeError);
@@ -46,19 +51,18 @@ impl GetColumnsUseCase {
         let mut files = preload_file; // asumiendo que ya es tuyo
         let file = files.remove(0);
         let bytes = file.file_data; // ahora sí tienes ownership
-
         let cursor = std::io::Cursor::new((&bytes).as_ref());
         let parse_opts = CsvParseOptions {
-            separator: b';',             // lo más común: coma como separador
-            quote_char: Some(b'"'),      // campos entre comillas dobles
-            eol_char: b'\n',             // salto de línea estándar
-            encoding: CsvEncoding::Utf8, // hoy en día casi todo es UTF-8
-            null_values: None,           // NULLs detectados por defecto (vacíos)
-            missing_is_null: true,       // celdas vacías = null
-            truncate_ragged_lines: true, // si faltan columnas, completa con nulls
-            comment_prefix: None,        // sin soporte de comentarios
-            try_parse_dates: true,       // intenta detectar fechas
-            decimal_comma: false,        // por defecto: decimal con punto (.)
+            separator: separator.as_bytes()[0], // lo más común: coma como separador
+            quote_char: Some(b'"'),             // campos entre comillas dobles
+            eol_char: b'\n',                    // salto de línea estándar
+            encoding: CsvEncoding::Utf8,        // hoy en día casi todo es UTF-8
+            null_values: None,                  // NULLs detectados por defecto (vacíos)
+            missing_is_null: true,              // celdas vacías = null
+            truncate_ragged_lines: true,        // si faltan columnas, completa con nulls
+            comment_prefix: None,               // sin soporte de comentarios
+            try_parse_dates: true,              // intenta detectar fechas
+            decimal_comma: false,               // por defecto: decimal con punto (.)
         };
 
         // Configuración general

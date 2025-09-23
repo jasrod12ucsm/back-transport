@@ -28,6 +28,7 @@ impl HashMapToStruct for HashMap<String, String> {
             };
             json_map.insert(key.clone(), json_value);
         }
+        println!("json_map: {:?}", json_map);
 
         if !errors.is_empty() {
             return Err(errors);

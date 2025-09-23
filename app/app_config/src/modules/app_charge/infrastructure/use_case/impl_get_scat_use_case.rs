@@ -61,7 +61,7 @@ WHERE <-mst_proyect_feature<-mst_proyect CONTAINS <record>$project_id;",
             let param = json!(
              {
                  "project_id": format!("mst_proyect:{}", id),
-                 "feature_id": format!("mst_feature:{}",feature.id.as_ref().unwrap().key().to_string())
+                 "feature_id": format!("mst_feature:{}",feature.id.as_ref().unwrap().key().to_string()),
              }
             );
             println!("param : {:?}", param);
@@ -80,7 +80,7 @@ SELECT (
                 out,
                 content_scatter,
                 ->mst_feature.name[0] AS name
-            FROM mst_feature_to_feature
+            FROM mst_feature_to_feature where in = <record>$feature_id
         ).{out, content_scatter, name} AS scatter
     FROM <record>$feature_id
     WHERE ->mst_feature_to_feature

@@ -3,10 +3,11 @@ use polars::lazy::dsl::col as expr_col;
 use polars::prelude::*;
 use pyo3::{
     IntoPyObjectExt, Py, PyAny, PyResult, Python,
-    types::{IntoPyDict, PyBytes, PyList, PyModule},
+    types::{IntoPyDict, PyBytes, PyList, PyModule, PyString},
 };
 use rand::{Rng, seq::SliceRandom, thread_rng};
 use rust_decimal::{Decimal, prelude::FromPrimitive};
+use std::sync::Mutex as Mutexstd;
 use std::{
     borrow::Cow,
     collections::{HashMap, HashSet},
@@ -103,18 +104,13 @@ impl ChargeFileUseCaseTrait for ChargeFileUseCase {
         Ok(JsonAdvanced(FileChargeResponse { ok: true }))
     }
 }
-
 fn downsample_with_density(points: &[(f64, f64)], target: usize) -> Vec<ScatterContent> {
-    use rand::Rng;
-    use std::collections::HashMap;
-
     // Calcular rangos
     let (x_min, x_max) = points
         .iter()
         .fold((f64::INFINITY, f64::NEG_INFINITY), |(min, max), &(x, _)| {
             (min.min(x), max.max(x))
         });
-
     let (y_min, y_max) = points
         .iter()
         .fold((f64::INFINITY, f64::NEG_INFINITY), |(min, max), &(_, y)| {
@@ -137,39 +133,72 @@ fn downsample_with_density(points: &[(f64, f64)], target: usize) -> Vec<ScatterC
         y_range / n_bins as f64
     };
 
-    let mut density_map: HashMap<(i32, i32), usize> = HashMap::new();
-    let mut point_bins: Vec<((i32, i32), (f64, f64))> = Vec::with_capacity(points.len());
+    let mut density_map: Arc<Mutexstd<HashMap<(i32, i32), usize>>> =
+        Arc::new(Mutexstd::new(HashMap::new()));
+    let mut point_bins: Arc<Mutexstd<Vec<((i32, i32), (f64, f64))>>> =
+        Arc::new(Mutexstd::new(Vec::with_capacity(points.len())));
+    let inb_bin_x = 1.0 / bin_size_x;
+    let inb_bin_y = 1.0 / bin_size_y;
 
-    for &(x, y) in points {
-        let bin_x = ((x - x_min) / bin_size_x).floor() as i32;
-        let bin_y = ((y - y_min) / bin_size_y).floor() as i32;
+    // Paso 1: llenar bins en paralelo
+    points.par_iter().for_each(|(x, y)| {
+        let bin_x = ((x - x_min) * inb_bin_x) as i32;
+        let bin_y = ((y - y_min) * inb_bin_y) as i32;
 
-        *density_map.entry((bin_x, bin_y)).or_insert(0) += 1;
-        point_bins.push(((bin_x, bin_y), (x, y)));
-    }
+        {
+            let mut map = density_map.lock().unwrap();
+            *map.entry((bin_x, bin_y)).or_default() += 1;
+        }
+        {
+            let mut bins = point_bins.lock().unwrap();
+            bins.push(((bin_x, bin_y), (*x, *y)));
+        }
+    });
 
-    // Encontrar densidad máxima
+    let density_map = Arc::try_unwrap(density_map).unwrap().into_inner().unwrap();
     let max_density = *density_map.values().max().unwrap_or(&1) as f64;
 
-    // Muestreo probabilístico
+    let points_bin = Arc::try_unwrap(point_bins).unwrap().into_inner().unwrap();
+    use rayon::prelude::*;
+    // Paso 2: muestreo paralelo con probabilidad
+    let sampled_points: Vec<(f64, f64)> = points_bin
+        .par_iter()
+        .fold(
+            || Vec::new(),
+            |mut local_vec, (bin, (x, y))| {
+                let mut rng = rand::thread_rng();
+                let density = *density_map.get(bin).unwrap_or(&1) as f64;
+
+                let center_x = (x_min + x_max) / 2.0;
+                let center_y = (y_min + y_max) / 2.0;
+                let dist = ((x - center_x).powi(2) + (y - center_y).powi(2)).sqrt();
+
+                let prob = (target as f64) / (points.len() as f64 * (density / max_density).sqrt())
+                    * (1.0 + dist / (x_range.max(y_range)));
+
+                if density <= 2.0 {
+                    local_vec.push((*x, *y));
+                } else if rng.random::<f64>() < prob {
+                    local_vec.push((*x, *y));
+                }
+                local_vec
+            },
+        )
+        .reduce(
+            || Vec::new(),
+            |mut a, mut b| {
+                a.append(&mut b);
+                a
+            },
+        );
+
+    // Paso 3: ajustar tamaño final
     let mut rng = rand::thread_rng();
-    let mut sampled_points = Vec::with_capacity(target);
-
-    for (bin, (x, y)) in point_bins {
-        let density = *density_map.get(&bin).unwrap_or(&1) as f64;
-        let prob = (target as f64) / (points.len() as f64 * (density / max_density).sqrt());
-
-        if rng.random::<f64>() < prob {
-            sampled_points.push((x, y));
-        }
-    }
-
-    // Ajustar tamaño final
+    let mut sampled_points = sampled_points;
     if sampled_points.len() > target {
         sampled_points.shuffle(&mut rng);
         sampled_points.truncate(target);
     } else if sampled_points.len() < 500 {
-        // Mínimo de puntos
         let mut remaining: Vec<_> = points
             .iter()
             .filter(|p| !sampled_points.contains(p))
@@ -184,6 +213,97 @@ fn downsample_with_density(points: &[(f64, f64)], target: usize) -> Vec<ScatterC
         .map(|(x, y)| ScatterContent { x, y })
         .collect()
 }
+
+//fn downsample_with_density(points: &[(f64, f64)], target: usize) -> Vec<ScatterContent> {
+//    use rand::Rng;
+//    use std::collections::HashMap;
+//
+//    // Calcular rangos
+//    let (x_min, x_max) = points
+//        .iter()
+//        .fold((f64::INFINITY, f64::NEG_INFINITY), |(min, max), &(x, _)| {
+//            (min.min(x), max.max(x))
+//        });
+//
+//    let (y_min, y_max) = points
+//        .iter()
+//        .fold((f64::INFINITY, f64::NEG_INFINITY), |(min, max), &(_, y)| {
+//            (min.min(y), max.max(y))
+//        });
+//
+//    let x_range = x_max - x_min;
+//    let y_range = y_max - y_min;
+//
+//    // Crear bins y calcular densidad
+//    let n_bins = 50;
+//    let bin_size_x = if x_range == 0.0 {
+//        1.0
+//    } else {
+//        x_range / n_bins as f64
+//    };
+//    let bin_size_y = if y_range == 0.0 {
+//        1.0
+//    } else {
+//        y_range / n_bins as f64
+//    };
+//
+//    let mut density_map: HashMap<(i32, i32), usize> = HashMap::new();
+//    let mut point_bins: Vec<((i32, i32), (f64, f64))> = Vec::with_capacity(points.len());
+//    let inb_bin_x = 1.0 / bin_size_x;
+//    let inb_bin_y = 1.0 / bin_size_y;
+//
+//    for &(x, y) in points {
+//        let bin_x = ((x - x_min) * inb_bin_x) as i32;
+//        let bin_y = ((y - y_min) * inb_bin_y) as i32;
+//
+//        *density_map.entry((bin_x, bin_y)).or_insert(0) += 1;
+//        point_bins.push(((bin_x, bin_y), (x, y)));
+//    }
+//
+//    // Encontrar densidad máxima
+//    let max_density = *density_map.values().max().unwrap_or(&1) as f64;
+//
+//    // Muestreo probabilístico
+//    let mut rng = rand::thread_rng();
+//    let mut sampled_points = Vec::with_capacity(target);
+//
+//    for (bin, (x, y)) in point_bins {
+//        let density = *density_map.get(&bin).unwrap_or(&1) as f64;
+//
+//        let center_x = (x_min + x_max) / 2.0;
+//        let center_y = (y_min + y_max) / 2.0;
+//        let dist = ((x - center_x).powi(2) + (y - center_y).powi(2)).sqrt();
+//
+//        // dar más probabilidad a puntos alejados
+//        let prob = (target as f64) / (points.len() as f64 * (density / max_density).sqrt())
+//            * (1.0 + dist / (x_range.max(y_range)));
+//        if density <= 2.0 {
+//            sampled_points.push((x, y));
+//        } else if rng.random::<f64>() < prob {
+//            sampled_points.push((x, y));
+//        }
+//    }
+//
+//    // Ajustar tamaño final
+//    if sampled_points.len() > target {
+//        sampled_points.shuffle(&mut rng);
+//        sampled_points.truncate(target);
+//    } else if sampled_points.len() < 500 {
+//        // Mínimo de puntos
+//        let mut remaining: Vec<_> = points
+//            .iter()
+//            .filter(|p| !sampled_points.contains(p))
+//            .cloned()
+//            .collect();
+//        remaining.shuffle(&mut rng);
+//        sampled_points.extend(remaining.into_iter().take(500 - sampled_points.len()));
+//    }
+//
+//    sampled_points
+//        .into_iter()
+//        .map(|(x, y)| ScatterContent { x, y })
+//        .collect()
+//}
 impl ChargeFileUseCase {
     async fn process_feature_pair(
         f1: Feature,
@@ -191,6 +311,8 @@ impl ChargeFileUseCase {
         data: LazyFrame,
     ) -> Result<RelateRequestBuilder<FeatureToFeature>, CsvError> {
         println!("processing");
+        println!("f1 name: {}", f1.name);
+        println!("f2 name: {}", f2.name);
         let f1_name = &f1.name;
         let f2_name = &f2.name;
         let f1_id = f1.id.as_ref().unwrap().key().to_string();
@@ -342,7 +464,7 @@ impl ChargeFileUseCase {
         let processing_semaphore = Arc::new(tokio::sync::Semaphore::new(processing_workers));
 
         for i in 0..only_value {
-            for j in (i + 1)..num_continuous {
+            for j in i..num_continuous {
                 let tx = tx.clone();
                 let f1 = only_continuous[i].clone();
                 let f2 = continuous[j].clone();
@@ -411,6 +533,11 @@ impl ChargeFileUseCase {
         if preload_file.get(0).unwrap().extension != "csv" {
             return Err(CsvError::InvalidFileType);
         }
+        let body = data
+            .get_data()
+            .ok_or_else(|| CsvError::FileChargeError)?
+            .clone();
+        let separator = body.separator.unwrap_or(",".to_string());
         let mut files = preload_file; // asumiendo que ya es tuyo
         let file = files.remove(0);
         let bytes = file.file_data; // ahora sí tienes ownership
@@ -432,9 +559,9 @@ impl ChargeFileUseCase {
 
             // columnas desde set_map (HashSet<String>)
             let py_columns = PyList::new(py, set_map.iter()).unwrap().unbind();
-
+            let py_separator_str = PyString::new(py, &separator).unbind();
             // llamar a la función
-            let df = func.call1(py, (py_csv_bytes, py_columns))?;
+            let df = func.call1(py, (py_csv_bytes, py_columns, py_separator_str))?;
 
             // de momento, solo devolvemos repr() del DataFrame
             Ok(df)
@@ -510,6 +637,7 @@ impl ChargeFileUseCase {
                 (k.to_string(), feature_type.to_string())
             })
             .collect();
+        println!("types: {:?}", types);
 
         let value = Python::attach(|py| -> PyResult<String> {
             let module = PyModule::from_code(

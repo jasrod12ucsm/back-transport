@@ -97,21 +97,23 @@ async fn charge_continous(
         .await
 }
 
-#[web::get("get_categorical_plot/{id}")]
+#[web::get("get_categorical_plot/{id}/{num_page}/{real_num_page}")]
 async fn get_categorical_plot(
-    id: Path<String>,
+    id: Path<(String, String, i32)>,
 ) -> Result<JsonAdvanced<CategoricalPlotResponse>, CsvError> {
+    let id = id.into_inner();
     GetCategoryPlotUseCase {}
-        .execute(id.into_inner())
+        .execute(id.0, id.1, id.2)
         .await
         .map(|r| JsonAdvanced(r))
 }
 
-#[web::get("get_continous_categorical/{id}")]
+#[web::get("get_continous_categorical/{id}/{feature_id}/{real_num_page}")]
 async fn get_continous_categorical(
-    id: Path<String>,
+    id: Path<(String, String, i32)>,
 ) -> Result<JsonAdvanced<ContinousCategoricalResponse>, CsvError> {
+    let id = id.into_inner();
     GetContinuousCategoricalUseCase {}
-        .execute(id.into_inner())
+        .execute(id.0, id.1, id.2)
         .await
 }

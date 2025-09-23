@@ -16,7 +16,12 @@ use crate::{
 };
 #[async_trait::async_trait]
 impl GetCategoryPlotUseCaseTrait for GetCategoryPlotUseCase {
-    async fn execute(&self, id: String) -> Result<CategoricalPlotResponse, CsvError> {
+    async fn execute(
+        &self,
+        id: String,
+        num_page: String,
+        real_num_page: i32,
+    ) -> Result<CategoricalPlotResponse, CsvError> {
         let db = try_get_surreal_pool()
             .ok_or_else(|| CsvError::FileChargeError)?
             .get()
@@ -25,11 +30,14 @@ impl GetCategoryPlotUseCaseTrait for GetCategoryPlotUseCase {
                 println!("{:?}", e);
                 CsvError::FileChargeError
             })?;
-        let conn = db.client.clone();
+        let start = (real_num_page - 1) * 3;
+        let end = real_num_page * 3;
 
         let param = json!(
         {
             "project_id": format!("mst_proyect:{}", id),
+            "feature_id": format!("mst_feature:{}",num_page),
+            "static": start,
         }
         );
         let conn = &db.client;
@@ -46,15 +54,15 @@ SELECT (
         (
             SELECT
                 out,
-                content_scatter,
+                content,
                 ->mst_feature.name[0] AS name
-            FROM mst_categorical_to_categorical
+            FROM mst_categorical_to_categorical where in= $parent.id START AT $static LIMIT 3
         ).{out, content, name} AS scatter
-    FROM mst_feature
+    FROM <record>$feature_id
     WHERE ->mst_categorical_to_categorical
 ) AS features
 FROM ONLY <record>$project_id
-WHERE ->mst_proyect_feature->mst_feature->mst_categorical_to_categorical;;
+WHERE ->mst_proyect_feature->mst_feature->mst_categorical_to_categorical;
             ",
             )
             .bind(param)

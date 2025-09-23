@@ -117,7 +117,10 @@ impl ChargeFieldScatterUseCaseTrait for ChargeFieldScatterUseCase {
             .clone()
             .fields
             .into_iter()
-            .filter(|f| matches!(f.type_feature, FeatureType::Continuous))
+            .filter(|f| {
+                matches!(f.type_feature, FeatureType::Continuous)
+                    && f.id.as_ref().unwrap().key().to_string() != field_id
+            })
             .collect();
         let feature_only = proyect
             .fields
@@ -169,6 +172,11 @@ impl ChargeFieldScatterUseCase {
         if preload_file.len() > 1 {
             return Err(CsvError::FileChargeError);
         }
+        let body = data
+            .get_data()
+            .ok_or_else(|| CsvError::FileChargeError)?
+            .clone();
+        let separator = body.separator.unwrap_or(",".to_string());
 
         // Bloque principal de mutación del mapa
         {
@@ -185,7 +193,7 @@ impl ChargeFieldScatterUseCase {
                     let cursor = std::io::Cursor::new(bytes);
 
                     let parse_opts = CsvParseOptions {
-                        separator: b';',
+                        separator: separator.as_bytes()[0],
                         quote_char: Some(b'"'),
                         eol_char: b'\n',
                         encoding: CsvEncoding::Utf8,
