@@ -1,12 +1,11 @@
-use derive_more::{Display,Error};
+use derive_more::Display;
 use ntex::web::{self, WebResponseError};
 use serde_json::json;
 
-
-#[derive(Debug,Display,Error)]
+#[derive(Debug, Display)]
 pub enum EncryptationError {
-    #[display(fmt = "Error on encrytation password")]
-    Error
+    #[display("Error on encrytation password")]
+    Error,
 }
 
 impl WebResponseError for EncryptationError {
@@ -18,7 +17,8 @@ impl WebResponseError for EncryptationError {
         match *self {
             EncryptationError::Error => web::HttpResponse::build(self.status_code())
                 .set_header("content-type", "application/json; charset=utf-8")
-                .json(&json!({ "error": self.to_string(), "statudCode": 404}))
+                .json(&json!({ "error": self.to_string(), "statudCode": 404})),
         }
     }
 }
+

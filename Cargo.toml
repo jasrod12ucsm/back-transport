@@ -1,13 +1,11 @@
 [workspace]
 members = [
     "app/auth",
-    "app/app_config",
-    "app/authorization",
-    "app/api",
     "common",
 ]
 
 resolver = "3"
+
 
 [profile.release]
 # ⚡ Mejor rendimiento en producción

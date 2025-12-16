@@ -1,5 +1,0 @@
-export PYO3_PYTHON=/home/jason/miniforge3/envs/torchgpu/bin/python
-
-
-export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
-./target/debug/app_config

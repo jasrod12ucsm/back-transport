@@ -22,30 +22,29 @@ impl BaseError {
     }
 }
 
-
 //multiparte
 #[derive(Debug, derive_more::Display)]
 pub enum MultipartError {
-    #[display(fmt = "Validation error on field:")]
+    #[display("Validation error on field:")]
     ValidationError(ValidationErrorStruct),
-    #[display(fmt = "Error reading multipart data")]
+    #[display("Error reading multipart data")]
     FileChargeError,
-    #[display(fmt = "Error reading multipart data")]
+    #[display("Error reading multipart data")]
     ValidationFieldsError(ValidationFieldsErrorStruct),
 }
 
 //json
 #[derive(Debug, derive_more::Display)]
 pub enum JsonError {
-    #[display(fmt = "Serialize error")]
+    #[display("Serialize error")]
     JsonSerializeError(String),
-    #[display(fmt = "Error reading json data")]
+    #[display("Error reading json data")]
     ValidationFieldsError(ValidationFieldsErrorStruct),
-    #[display(fmt = "Error reading json data")]
+    #[display("Error reading json data")]
     InternalServerError,
-    #[display(fmt = "transform payload error")]
+    #[display("transform payload error")]
     JsonBasicTransformError,
-    #[display(fmt = "Payload size exceeded")]
+    #[display("Payload size exceeded")]
     PayloadSizeExceeded(PayloadSizes),
 }
 #[derive(Debug, Serialize)]
@@ -197,7 +196,7 @@ impl web::error::WebResponseError for JsonError {
                     .set_header("content-type", "text/json; charset=utf-8")
                     .json(&error)
             }
-            JsonError::ValidationFieldsError(ref field) => {
+            JsonError::ValidationFieldsError(field) => {
                 let error: BaseError = field.into();
                 web::HttpResponse::build(self.status_code())
                     .set_header("content-type", "text/json; charset=utf-8")
