@@ -1,0 +1,29 @@
+[package]
+name = "tentant_core"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dashmap = "6.1.0"
+
+
+sqlx = { version = "0.8.6",features = ["postgres","runtime-tokio-native-tls","json","chrono","uuid"]}
+thiserror = {workspace= true}
+tracing = {workspace= true}
+serde_json = {workspace= true}
+
+moka = { version = "0.12.12", features = ["future"] }
+redis = { version = "1.0.2", features = ["tokio-comp", "connection-manager", "streams"] }
+base64 = "0.22.1"
+
+aes-gcm = "0.10.3"
+async-nats = "0.45.0"
+serde = { workspace = true }
+uuid = { workspace = true }
+chrono = { workspace = true }
+ntex = { workspace = true }
+ring = "0.17.14"
+async-trait = { workspace = true }
+futures = { workspace = true }
+tracing-subscriber = { workspace = true }
+tokio = { workspace = true }
