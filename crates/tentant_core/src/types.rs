@@ -56,19 +56,16 @@ pub enum TenantStatus {
     Deactivated,
 }
 
-/// Configuración completa de un tenant
+/// Configuración esencial de un tenant
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TenantConfig {
     pub id: TenantId,
     pub name: String,
-    pub slug: String,
+    pub database_name: String, // "products", "orders", "users", etc.
     pub connection_string: String,
-    pub min_connections: u32,
     pub status: TenantStatus,
     pub max_connections: u32,
-    pub region: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub neon_project_id: Option<String>,
+    pub min_connections: u32,
 }
 
 impl TenantConfig {
@@ -77,7 +74,7 @@ impl TenantConfig {
     }
 
     pub fn cache_key(&self) -> String {
-        format!("tenant:{}", self.id)
+        format!("tenant:{}:{}", self.id, self.database_name)
     }
 }
 
@@ -95,25 +92,4 @@ impl TenantContext {
             tenant_name,
         }
     }
-}
-
-/// Información de Neon project
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct NeonProject {
-    pub id: String,
-    pub name: String,
-    pub region_id: String,
-    pub created_at: chrono::DateTime<chrono::Utc>,
-    pub database_host: String,
-    pub database_name: String,
-}
-
-/// Quotas de Neon por tier
-#[derive(Debug, Clone)]
-pub struct NeonQuota {
-    pub compute_time_seconds: i64,
-    pub storage_bytes: i64,
-    pub autoscaling_min_cu: f32,
-    pub autoscaling_max_cu: f32,
-    pub suspend_timeout_seconds: u32,
 }

@@ -15,7 +15,7 @@ serde_json = {workspace= true}
 moka = { version = "0.12.12", features = ["future"] }
 redis = { version = "1.0.2", features = ["tokio-comp", "connection-manager", "streams"] }
 base64 = "0.22.1"
-
+jsonwebtoken = {workspace = true}
 aes-gcm = "0.10.3"
 async-nats = "0.45.0"
 serde = { workspace = true }

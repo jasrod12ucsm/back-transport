@@ -38,14 +38,21 @@ pub struct TenantConfigResolver {
     encryption_key: [u8; 32],
     /// TTL para cache L2
     l2_ttl_seconds: u64,
+    /// Nombre de la database para este servicio
+    database_name: String,
 }
 
 impl TenantConfigResolver {
     /// Crea un builder para configurar el resolver
-    pub fn builder(catalog_db: PgPool, encryption_key: [u8; 32]) -> TenantConfigResolverBuilder {
+    pub fn builder(
+        catalog_db: PgPool,
+        encryption_key: [u8; 32],
+        database_name: String,
+    ) -> TenantConfigResolverBuilder {
         TenantConfigResolverBuilder {
             catalog_db,
             encryption_key,
+            database_name,
             enable_l1: false,
             enable_l2: false,
             redis_url: None,
@@ -56,66 +63,92 @@ impl TenantConfigResolver {
         }
     }
 
-    /// Resuelve config con fallback L1 → L2 → L3
-    pub async fn resolve(&self, tenant_id: &TenantId) -> Result<Arc<TenantConfig>, ResolverError> {
+    /// Resuelve config para un tenant y database específica
+    pub async fn resolve(
+        &self,
+        tenant_id: &TenantId,
+        database_name: &str,
+    ) -> Result<Arc<TenantConfig>, ResolverError> {
         // L1: Check local cache (si está habilitado)
+        // Clave de cache incluye database_name
+        let cache_key = format!("{}:{}", tenant_id, database_name);
+
         if let Some(cache) = &self.local_cache {
-            if let Some(config) = cache.get(tenant_id).await {
-                debug!(tenant_id = %tenant_id, "L1 cache hit");
-                return Ok(config);
+            // Nota: Moka usa TenantId como key, pero podríamos usar un wrapper
+            // Por simplicidad, solo checamos L2 y L3 cuando database_name != self.database_name
+            if database_name == self.database_name {
+                if let Some(config) = cache.get(tenant_id).await {
+                    debug!(
+                        tenant_id = %tenant_id,
+                        database = %database_name,
+                        "L1 cache hit"
+                    );
+                    return Ok(config);
+                }
             }
         }
 
         // L2: Check Redis (si está habilitado)
         if let Some(redis) = &self.redis {
-            let redis_key = format!("tenant:{}:config", tenant_id);
+            let redis_key = format!("tenant:{}:{}:config", tenant_id, database_name);
             let mut redis_conn = redis.clone();
 
             match redis_conn.get::<_, Option<String>>(&redis_key).await {
                 Ok(Some(json)) => {
                     if let Ok(config) = serde_json::from_str::<TenantConfig>(&json) {
-                        debug!(tenant_id = %tenant_id, "L2 cache hit");
+                        debug!(
+                            tenant_id = %tenant_id,
+                            database = %database_name,
+                            "L2 cache hit"
+                        );
                         let config = Arc::new(config);
 
-                        // Populate L1 si está habilitado
-                        if let Some(cache) = &self.local_cache {
-                            cache.insert(tenant_id.clone(), config.clone()).await;
+                        // Populate L1 solo si es la database principal
+                        if database_name == self.database_name {
+                            if let Some(cache) = &self.local_cache {
+                                cache.insert(tenant_id.clone(), config.clone()).await;
+                            }
                         }
                         return Ok(config);
                     }
                 }
-                Ok(None) => debug!(tenant_id = %tenant_id, "L2 cache miss"),
-                Err(e) => warn!(tenant_id = %tenant_id, error = %e, "L2 cache error"),
+                Ok(None) => debug!(
+                    tenant_id = %tenant_id,
+                    database = %database_name,
+                    "L2 cache miss"
+                ),
+                Err(e) => warn!(
+                    tenant_id = %tenant_id,
+                    database = %database_name,
+                    error = %e,
+                    "L2 cache error"
+                ),
             }
         }
 
         // L3: Query database (siempre)
-        debug!(tenant_id = %tenant_id, "L3 database lookup");
-        let config = self.fetch_from_db(tenant_id).await?;
+        debug!(
+            tenant_id = %tenant_id,
+            database = %database_name,
+            "L3 database lookup"
+        );
+        let config = self.fetch_from_db(tenant_id, database_name).await?;
         let config = Arc::new(config);
 
         // Populate caches (los que estén habilitados)
-        self.populate_caches(tenant_id, &config).await;
+        self.populate_caches(tenant_id, database_name, &config)
+            .await;
 
         Ok(config)
     }
 
-    /// Obtiene config desde PostgreSQL
-    async fn fetch_from_db(&self, tenant_id: &TenantId) -> Result<TenantConfig, ResolverError> {
+    /// Obtiene el nombre del tenant (sin cargar toda la config)
+    pub async fn get_tenant_name(&self, tenant_id: &TenantId) -> Result<String, ResolverError> {
         let row = sqlx::query(
             r#"
-            SELECT 
-                id,
-                name,
-                slug,
-                connection_string_encrypted,
-                status,
-                max_connections,
-                min_connections,
-                region,
-                neon_project_id
-            FROM tenants 
+            SELECT name FROM tenants 
             WHERE id = $1
+            LIMIT 1
             "#,
         )
         .bind(*tenant_id.as_uuid())
@@ -123,16 +156,42 @@ impl TenantConfigResolver {
         .await?
         .ok_or_else(|| ResolverError::TenantNotFound(tenant_id.to_string()))?;
 
+        let name: String = row.try_get("name")?;
+        Ok(name)
+    }
+
+    /// Obtiene config desde PostgreSQL para una database específica
+    async fn fetch_from_db(
+        &self,
+        tenant_id: &TenantId,
+        database_name: &str,
+    ) -> Result<TenantConfig, ResolverError> {
+        let row = sqlx::query(
+            r#"
+            SELECT 
+                id,
+                name,
+                connection_string_encrypted,
+                status,
+                max_connections,
+                min_connections
+            FROM tenants 
+            WHERE id = $1 AND database_name = $2
+            "#,
+        )
+        .bind(*tenant_id.as_uuid())
+        .bind(database_name)
+        .fetch_optional(&self.catalog_db)
+        .await?
+        .ok_or_else(|| ResolverError::TenantNotFound(tenant_id.to_string()))?;
+
         // Extraer valores manualmente
         let id: Uuid = row.try_get("id")?;
         let name: String = row.try_get("name")?;
-        let slug: String = row.try_get("slug")?;
         let connection_string_encrypted: Vec<u8> = row.try_get("connection_string_encrypted")?;
         let status_str: String = row.try_get("status")?;
         let max_connections: Option<i32> = row.try_get("max_connections")?;
         let min_connections: Option<i32> = row.try_get("min_connections")?;
-        let region: String = row.try_get("region")?;
-        let neon_project_id: Option<String> = row.try_get("neon_project_id")?;
 
         // Parsear status
         let status = match status_str.as_str() {
@@ -162,26 +221,31 @@ impl TenantConfigResolver {
         Ok(TenantConfig {
             id: TenantId::from_uuid(id),
             name,
-            slug,
+            database_name: database_name.to_string(),
             connection_string,
             status,
             max_connections: max_connections.unwrap_or(10) as u32,
             min_connections: min_connections.unwrap_or(2) as u32,
-            region,
-            neon_project_id,
         })
     }
 
     /// Puebla caches habilitados con una config
-    async fn populate_caches(&self, tenant_id: &TenantId, config: &Arc<TenantConfig>) {
-        // L1 (si está habilitado)
-        if let Some(cache) = &self.local_cache {
-            cache.insert(tenant_id.clone(), config.clone()).await;
+    async fn populate_caches(
+        &self,
+        tenant_id: &TenantId,
+        database_name: &str,
+        config: &Arc<TenantConfig>,
+    ) {
+        // L1 (solo si es la database principal)
+        if database_name == self.database_name {
+            if let Some(cache) = &self.local_cache {
+                cache.insert(tenant_id.clone(), config.clone()).await;
+            }
         }
 
         // L2 (si está habilitado)
         if let Some(redis) = &self.redis {
-            let redis_key = format!("tenant:{}:config", tenant_id);
+            let redis_key = format!("tenant:{}:{}:config", tenant_id, database_name);
             let mut redis_conn = redis.clone();
 
             if let Ok(json) = serde_json::to_string(config.as_ref()) {
@@ -191,6 +255,7 @@ impl TenantConfigResolver {
                 {
                     warn!(
                         tenant_id = %tenant_id,
+                        database = %database_name,
                         error = %e,
                         "Failed to populate L2 cache"
                     );
@@ -199,41 +264,53 @@ impl TenantConfigResolver {
         }
     }
 
-    /// Invalida cache para un tenant
-    pub async fn invalidate(&self, tenant_id: &TenantId) {
-        // L1
-        if let Some(cache) = &self.local_cache {
-            cache.invalidate(tenant_id).await;
+    /// Invalida cache para un tenant y database específica
+    pub async fn invalidate(&self, tenant_id: &TenantId, database_name: &str) {
+        // L1 (solo si es la principal)
+        if database_name == self.database_name {
+            if let Some(cache) = &self.local_cache {
+                cache.invalidate(tenant_id).await;
+            }
         }
 
         // L2
         if let Some(redis) = &self.redis {
-            let redis_key = format!("tenant:{}:config", tenant_id);
+            let redis_key = format!("tenant:{}:{}:config", tenant_id, database_name);
             let mut redis_conn = redis.clone();
 
             if let Err(e) = redis_conn.del::<&str, i32>(&redis_key).await {
                 warn!(
                     tenant_id = %tenant_id,
+                    database = %database_name,
                     error = %e,
                     "Failed to invalidate L2 cache"
                 );
             }
         }
 
-        info!(tenant_id = %tenant_id, "Cache invalidated");
+        info!(
+            tenant_id = %tenant_id,
+            database = %database_name,
+            "Cache invalidated"
+        );
     }
 
     /// Invalida cache de múltiples tenants
-    pub async fn invalidate_many(&self, tenant_ids: &[TenantId]) {
-        for tenant_id in tenant_ids {
-            self.invalidate(tenant_id).await;
+    pub async fn invalidate_many(&self, tenant_ids: &[(TenantId, String)]) {
+        for (tenant_id, database_name) in tenant_ids {
+            self.invalidate(tenant_id, database_name).await;
         }
     }
 
     /// Pre-carga config en cache
-    pub async fn preload(&self, tenant_id: &TenantId) -> Result<(), ResolverError> {
-        let config = self.fetch_from_db(tenant_id).await?;
-        self.populate_caches(tenant_id, &Arc::new(config)).await;
+    pub async fn preload(
+        &self,
+        tenant_id: &TenantId,
+        database_name: &str,
+    ) -> Result<(), ResolverError> {
+        let config = self.fetch_from_db(tenant_id, database_name).await?;
+        self.populate_caches(tenant_id, database_name, &Arc::new(config))
+            .await;
         Ok(())
     }
 
@@ -269,6 +346,7 @@ impl Clone for TenantConfigResolver {
             catalog_db: self.catalog_db.clone(),
             encryption_key: self.encryption_key,
             l2_ttl_seconds: self.l2_ttl_seconds,
+            database_name: self.database_name.clone(),
         }
     }
 }
@@ -277,6 +355,7 @@ impl Clone for TenantConfigResolver {
 pub struct TenantConfigResolverBuilder {
     catalog_db: PgPool,
     encryption_key: [u8; 32],
+    database_name: String,
     enable_l1: bool,
     enable_l2: bool,
     redis_url: Option<String>,
@@ -341,6 +420,7 @@ impl TenantConfigResolverBuilder {
             catalog_db: self.catalog_db,
             encryption_key: self.encryption_key,
             l2_ttl_seconds: self.l2_ttl_seconds,
+            database_name: self.database_name,
         })
     }
 }

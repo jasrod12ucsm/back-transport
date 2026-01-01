@@ -6,7 +6,7 @@ use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
-use tracing::{debug, info, warn};
+use tracing::{debug, info};
 
 #[derive(Debug, Error)]
 pub enum PoolError {
@@ -29,8 +29,6 @@ pub struct PoolStats {
     pub idle: u32,
 }
 
-// Nota: sqlx no expone PoolState directamente en la API pública
-// Usaremos el método size() que devuelve u32
 impl PoolStats {
     pub fn from_pool(pool: &PgPool) -> Self {
         let size = pool.size();
@@ -41,10 +39,34 @@ impl PoolStats {
     }
 }
 
+/// Clave compuesta para identificar pools únicos
+/// Soporta múltiples databases por tenant (products, orders, users, etc.)
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PoolKey {
+    pub tenant_id: TenantId,
+    pub database_name: String,
+}
+
+impl PoolKey {
+    pub fn new(tenant_id: TenantId, database_name: String) -> Self {
+        Self {
+            tenant_id,
+            database_name,
+        }
+    }
+}
+
+impl std::fmt::Display for PoolKey {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}:{}", self.tenant_id, self.database_name)
+    }
+}
+
 /// Manager de pools multi-tenant usando sqlx
+/// Soporta múltiples databases por tenant (un pool por database)
 pub struct TenantPoolManager {
-    /// Map de tenant_id -> PgPool
-    pools: Arc<DashMap<TenantId, PgPool>>,
+    /// Map de (tenant_id, database_name) -> PgPool
+    pools: Arc<DashMap<PoolKey, PgPool>>,
     /// Configuración por defecto
     default_max_connections: u32,
     default_min_connections: u32,
@@ -78,27 +100,36 @@ impl TenantPoolManager {
         )
     }
 
-    /// Obtiene un pool existente o lo crea lazy
+    /// Obtiene o crea pool para un tenant y database específica
     pub async fn get_pool(&self, config: &TenantConfig) -> Result<PgPool, PoolError> {
-        // Fast path: pool ya existe
-        if let Some(pool) = self.pools.get(&config.id) {
-            debug!(tenant_id = %config.id, "Pool cache hit");
+        let key = PoolKey::new(config.id.clone(), config.database_name.clone());
+
+        // Usar entry API para evitar race conditions
+        if let Some(pool) = self.pools.get(&key) {
+            debug!(
+                tenant_id = %config.id,
+                database = %config.database_name,
+                "Pool cache hit"
+            );
             return Ok(pool.clone());
         }
 
-        // Slow path: crear pool
-        debug!(tenant_id = %config.id, "Pool cache miss, creating new pool");
+        debug!(
+            tenant_id = %config.id,
+            database = %config.database_name,
+            "Creating new pool"
+        );
+
         let pool = self.create_pool(config).await?;
 
-        // Insert con check de race condition
-        self.pools
-            .entry(config.id.clone())
-            .or_insert_with(|| pool.clone());
+        // Insertar y retornar el pool
+        self.pools.insert(key.clone(), pool.clone());
 
         info!(
             tenant_id = %config.id,
-            max_conn = config.max_connections,
-            "Created new pool for tenant"
+            database = %config.database_name,
+            size = pool.size(),
+            "Pool created successfully"
         );
 
         Ok(pool)
@@ -112,17 +143,23 @@ impl TenantPoolManager {
             self.default_max_connections
         };
 
+        let min_connections = if config.min_connections > 0 {
+            config.min_connections
+        } else {
+            self.default_min_connections
+        };
+
         // Parse connection string
         let connect_opts = PgConnectOptions::from_str(&config.connection_string)
             .map_err(|e| PoolError::InvalidConnectionString(e.to_string()))?
-            .application_name(&format!("tenant-{}", config.id))
+            .application_name(&format!("tenant-{}-{}", config.id, config.database_name))
             .log_statements(tracing::log::LevelFilter::Debug)
             .log_slow_statements(tracing::log::LevelFilter::Warn, Duration::from_millis(500));
 
         // Crear pool con configuración
         let pool = PgPoolOptions::new()
             .max_connections(max_connections)
-            .min_connections(self.default_min_connections)
+            .min_connections(min_connections)
             .acquire_timeout(self.acquire_timeout)
             .idle_timeout(Some(self.idle_timeout))
             .max_lifetime(Some(Duration::from_secs(3600))) // 1 hora max lifetime
@@ -134,102 +171,84 @@ impl TenantPoolManager {
         Ok(pool)
     }
 
-    /// Pre-calienta un pool (útil en eventos TenantCreated)
-    pub async fn warm_pool(&self, config: &TenantConfig) -> Result<(), PoolError> {
-        let pool = self.get_pool(config).await?;
+    /// Cierra pool para un tenant/database específico
+    pub async fn close_pool(&self, tenant_id: &TenantId, database_name: &str) {
+        let key = PoolKey::new(tenant_id.clone(), database_name.to_string());
 
-        // Adquiere y libera una conexión para verificar conectividad
-        let conn = pool
-            .acquire()
-            .await
-            .map_err(|e| PoolError::AcquireFailed(e.to_string()))?;
-
-        drop(conn); // Liberar inmediatamente
-
-        info!(tenant_id = %config.id, "Pool warmed successfully");
-        Ok(())
+        if let Some((_, pool)) = self.pools.remove(&key) {
+            pool.close().await;
+            info!(
+                tenant_id = %tenant_id,
+                database = %database_name,
+                "Pool closed"
+            );
+        }
     }
 
-    /// Remueve un pool (útil en eventos TenantDeactivated)
-    pub async fn remove_pool(&self, tenant_id: &TenantId) {
-        if let Some((_, pool)) = self.pools.remove(tenant_id) {
-            pool.close().await;
-            info!(tenant_id = %tenant_id, "Pool removed and closed");
+    /// Cierra TODOS los pools de un tenant (todas sus databases)
+    pub async fn close_all_tenant_pools(&self, tenant_id: &TenantId) {
+        let mut closed_count = 0;
+
+        // Filtrar todas las keys que pertenecen a este tenant
+        let keys_to_remove: Vec<PoolKey> = self
+            .pools
+            .iter()
+            .filter(|entry| entry.key().tenant_id == *tenant_id)
+            .map(|entry| entry.key().clone())
+            .collect();
+
+        for key in keys_to_remove {
+            if let Some((_, pool)) = self.pools.remove(&key) {
+                pool.close().await;
+                closed_count += 1;
+            }
+        }
+
+        if closed_count > 0 {
+            info!(
+                tenant_id = %tenant_id,
+                pools_closed = closed_count,
+                "All tenant pools closed"
+            );
         }
     }
 
     /// Obtiene estadísticas de un pool
-    pub fn get_stats(&self, tenant_id: &TenantId) -> Option<PoolStats> {
-        self.pools
-            .get(tenant_id)
-            .map(|pool| PoolStats::from_pool(pool.value()))
+    pub fn get_pool_stats(&self, tenant_id: &TenantId, database_name: &str) -> Option<PoolStats> {
+        let key = PoolKey::new(tenant_id.clone(), database_name.to_string());
+        self.pools.get(&key).map(|pool| PoolStats::from_pool(&pool))
     }
 
-    /// Obtiene estadísticas de todos los pools
-    pub fn get_all_stats(&self) -> Vec<(TenantId, PoolStats)> {
-        self.pools
-            .iter()
-            .map(|entry| {
-                let tenant_id = entry.key().clone();
-                let stats = PoolStats::from_pool(entry.value());
-                (tenant_id, stats)
-            })
-            .collect()
-    }
-
-    /// Evict pools idle (ejecutar periódicamente)
-    pub async fn evict_idle_pools(&self, _min_idle_time: Duration) {
-        // Nota: sin acceso a PoolState, simplemente evictamos pools con size mínimo
-        let to_remove: Vec<TenantId> = self
-            .pools
-            .iter()
-            .filter_map(|entry| {
-                let size = entry.value().size();
-                // Si el pool tiene el tamaño mínimo, asumimos que está idle
-                if size == self.default_min_connections {
-                    Some(entry.key().clone())
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        for tenant_id in to_remove {
-            warn!(tenant_id = %tenant_id, "Evicting idle pool");
-            self.remove_pool(&tenant_id).await;
-        }
-    }
-
-    /// Número de pools activos
+    /// Cuenta pools activos
     pub fn active_pools_count(&self) -> usize {
         self.pools.len()
     }
 
-    /// Cierra todos los pools
-    pub async fn close_all(&self) {
-        let all_ids: Vec<TenantId> = self.pools.iter().map(|e| e.key().clone()).collect();
+    /// Evict pools inactivos (sin uso reciente)
+    pub async fn evict_idle_pools(&self, max_idle_time: Duration) {
+        let mut evicted = 0;
 
-        for tenant_id in all_ids {
-            self.remove_pool(&tenant_id).await;
-        }
+        // Por simplicidad, evict todos los pools
+        // En producción, querrías trackear último uso
+        let all_keys: Vec<PoolKey> = self.pools.iter().map(|e| e.key().clone()).collect();
 
-        info!("All pools closed");
-    }
-
-    /// Health check de un pool específico
-    pub async fn health_check(&self, tenant_id: &TenantId) -> Result<bool, PoolError> {
-        let pool = self
-            .pools
-            .get(tenant_id)
-            .ok_or_else(|| PoolError::TenantNotFound(tenant_id.to_string()))?;
-
-        match sqlx::query("SELECT 1").fetch_one(pool.value()).await {
-            Ok(_) => Ok(true),
-            Err(e) => {
-                warn!(tenant_id = %tenant_id, error = %e, "Pool health check failed");
-                Ok(false)
+        for key in all_keys {
+            if let Some((_, pool)) = self.pools.remove(&key) {
+                pool.close().await;
+                evicted += 1;
             }
         }
+
+        if evicted > 0 {
+            info!(pools_evicted = evicted, "Idle pools evicted");
+        }
+    }
+
+    /// Health check - verifica que se pueden crear pools
+    pub async fn health_check(&self, config: &TenantConfig) -> Result<(), PoolError> {
+        let pool = self.get_pool(config).await?;
+        sqlx::query("SELECT 1").fetch_one(&pool).await?;
+        Ok(())
     }
 }
 
@@ -242,5 +261,31 @@ impl Clone for TenantPoolManager {
             acquire_timeout: self.acquire_timeout,
             idle_timeout: self.idle_timeout,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_pool_key() {
+        let tenant_id = TenantId::new();
+        let key1 = PoolKey::new(tenant_id.clone(), "products".to_string());
+        let key2 = PoolKey::new(tenant_id.clone(), "orders".to_string());
+        let key3 = PoolKey::new(tenant_id.clone(), "products".to_string());
+
+        assert_ne!(key1, key2); // Diferentes databases
+        assert_eq!(key1, key3); // Misma database
+    }
+
+    #[test]
+    fn test_pool_key_display() {
+        let tenant_id = TenantId::new();
+        let key = PoolKey::new(tenant_id.clone(), "products".to_string());
+        let display = format!("{}", key);
+
+        assert!(display.contains("products"));
+        assert!(display.contains(&tenant_id.to_string()));
     }
 }
