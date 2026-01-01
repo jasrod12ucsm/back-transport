@@ -31,7 +31,6 @@ pub use pool_manager::{PoolError, PoolKey, PoolStats, TenantPoolManager};
 pub use types::{TenantConfig, TenantContext, TenantId, TenantStatus};
 
 /// Versión del crate
-pub const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Builder para configurar tenant-core
 pub struct TenantCoreBuilder {
